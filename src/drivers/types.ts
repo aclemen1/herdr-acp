@@ -3,6 +3,7 @@ import type {
   ElicitationSchema,
   McpServer,
   PermissionOption,
+  SessionMode,
   SessionUpdate,
   StopReason,
   ToolCallUpdate,
@@ -26,6 +27,7 @@ export type DriverEvent =
 export interface TranscriptParser {
   parse(record: unknown, options: { replay: boolean }): DriverEvent[];
   markAnnounced(toolCallId: string): void;
+  markSettled(toolCallId: string): void;
 }
 
 export type LaunchInput = {
@@ -36,14 +38,20 @@ export type LaunchInput = {
   stateDir: string;
   extraArgs: string[];
   hookCommand: string;
+  mode?: string;
 };
 
 export interface HookHost {
   readonly sessionId: string;
   notify(update: SessionUpdate): Promise<void>;
   announceToolCall(toolCallId: string): void;
+  settleToolCall(toolCallId: string): void;
   streamText(text: string): Promise<void>;
   requestPermission(toolCall: ToolCallUpdate, options: PermissionOption[]): Promise<string | null>;
+  reportMode(modeId: string): Promise<void>;
+  takePendingMode(): string | null;
+  restorePendingMode(modeId: string): void;
+  continueWithMode(modeId: string, prompt: string): void;
   elicit(request: { message: string; schema: ElicitationSchema; toolCallId?: string }): Promise<CreateElicitationResponse | null>;
   markCancelled(): void;
 }
@@ -61,4 +69,9 @@ export interface Driver {
   createHookHandler(host: HookHost): HookHandler;
   isFolderTrusted(cwd: string): Promise<boolean>;
   readonly acceptTrustKeys: string[];
+  installGlobalHooks(command: string): Promise<string>;
+  uninstallGlobalHooks(): Promise<string>;
+  availableModes(extraArgs: string[]): SessionMode[];
+  initialMode(extraArgs: string[]): Promise<string>;
+  readonly exitCommand: string;
 }

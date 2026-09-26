@@ -23,6 +23,9 @@ export function toolKind(name: string): ToolKind {
     case "Task":
     case "Agent":
       return "think";
+    case "ExitPlanMode":
+    case "EnterPlanMode":
+      return "switch_mode";
     default:
       return "other";
   }

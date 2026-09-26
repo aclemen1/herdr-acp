@@ -31,7 +31,7 @@ export function createAgent(config: SessionConfig, version: string) {
     .onRequest("session/new", async ({ params, client, requestId }) => {
       const session = await Session.create(config, params, { client, requestId });
       sessions.set(session.sessionId, session);
-      return { sessionId: session.sessionId, _meta: { herdr: { paneId: session.pane } } };
+      return { sessionId: session.sessionId, modes: session.modeState, _meta: { herdr: { paneId: session.pane } } };
     })
     .onRequest("session/load", async ({ params, client, requestId }) => {
       let session = sessions.get(params.sessionId);
@@ -41,7 +41,11 @@ export function createAgent(config: SessionConfig, version: string) {
         sessions.set(session.sessionId, session);
       }
       await session.replayHistory();
-      return { _meta: { herdr: { paneId: session.pane } } };
+      return { modes: session.modeState, _meta: { herdr: { paneId: session.pane } } };
+    })
+    .onRequest("session/set_mode", async ({ params }) => {
+      await getSession(params.sessionId).setMode(params.modeId);
+      return {};
     })
     .onRequest("session/list", async ({ params }) => ({ sessions: await listLiveSessions(config, params.cwd) }))
     .onRequest("session/prompt", async ({ params }) => getSession(params.sessionId).prompt(params.prompt))

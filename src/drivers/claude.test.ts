@@ -113,3 +113,14 @@ test("merges user settings with herdr-acp hooks", () => {
     hooks: { PreToolUse: [{ matcher: "Bash" }, { matcher: "*" }], MessageDisplay: [{}] },
   });
 });
+
+test("skips synthetic messages and results of settled tool calls", () => {
+  const parser = new ClaudeTranscriptParser();
+  const synthetic = { ...assistant("x", [{ type: "text", text: "No response requested." }]), message: { id: "x", model: "<synthetic>", content: [{ type: "text", text: "No response requested." }] } };
+  assert.deepEqual(parser.parse(synthetic, { replay: false }), []);
+  parser.markAnnounced("t5");
+  parser.parse(assistant("m5", [{ type: "tool_use", id: "t5", name: "ExitPlanMode", input: {} }]), { replay: false });
+  parser.markSettled("t5");
+  const result = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t5", content: "denied", is_error: true }] } };
+  assert.deepEqual(parser.parse(result, { replay: false }), []);
+});

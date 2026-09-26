@@ -16,6 +16,7 @@ const { values, positionals } = parseArgs({
     "cancel-after": { type: "string" },
     "no-forms": { type: "boolean", default: false },
     "trust-folders": { type: "boolean", default: false },
+    "set-mode": { type: "string" },
   },
 });
 
@@ -67,6 +68,9 @@ await acp
       case "tool_call_update":
         log("tool_call_update", { id: update.toolCallId, status: update.status });
         break;
+      case "current_mode_update":
+        log("current_mode_update", update.currentModeId);
+        break;
       default:
         log(update.sessionUpdate);
     }
@@ -87,7 +91,12 @@ await acp
       } else {
         const created = await ctx.request("session/new", { cwd: values.cwd!, mcpServers: [] });
         sessionId = created.sessionId;
-        log("NEW", created);
+        log("NEW", { sessionId: created.sessionId, mode: created.modes?.currentModeId, modes: created.modes?.availableModes.map((m) => m.id) });
+      }
+      if (values["set-mode"]) {
+        const started = Date.now();
+        await ctx.request("session/set_mode", { sessionId, modeId: values["set-mode"] });
+        log("SET_MODE", { modeId: values["set-mode"], ms: Date.now() - started });
       }
       for (const text of prompts) {
         log("PROMPT", text);

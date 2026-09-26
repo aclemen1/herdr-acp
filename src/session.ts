@@ -8,6 +8,8 @@ import type {
   McpServer,
   PermissionOption,
   PromptResponse,
+  SessionMode,
+  SessionModeState,
   SessionUpdate,
   StopReason,
   ToolCallUpdate,
@@ -37,7 +39,7 @@ export type SessionConfig = {
 export type RequestContext = { client: AgentContext; requestId: string | number | null };
 
 type Placement = { paneId: string; tabId: string | null };
-type Turn = { cancelled: boolean; streamed: string };
+type Turn = { cancelled: boolean; streamed: string; continuation: { modeId: string; prompt: string } | null };
 
 let placementQueue: Promise<unknown> = Promise.resolve();
 
@@ -57,8 +59,21 @@ export class Session implements HookHost {
   private readonly parser: TranscriptParser;
   private hookServer: HookServer | null = null;
   private turn: Turn | null = null;
+  private readonly modes: SessionMode[];
+  private mode: string;
+  private pendingMode: string | null = null;
+  private restarting: Promise<void> = Promise.resolve();
+  private readonly mcpServers: McpServer[];
+  private readonly canRestart: boolean;
 
-  private constructor(config: SessionConfig, client: AgentContext, id: string, cwd: string, placement: Placement) {
+  private constructor(
+    config: SessionConfig,
+    client: AgentContext,
+    id: string,
+    cwd: string,
+    placement: Placement,
+    init: { mode: string; mcpServers: McpServer[]; canRestart: boolean },
+  ) {
     this.config = config;
     this.client = client;
     this.sessionId = id;
@@ -66,6 +81,14 @@ export class Session implements HookHost {
     this.paneId = placement.paneId;
     this.ownedTabId = placement.tabId;
     this.parser = config.driver.createParser();
+    this.modes = config.driver.availableModes(config.extraArgs);
+    this.mode = init.mode;
+    this.mcpServers = init.mcpServers;
+    this.canRestart = init.canRestart;
+  }
+
+  get modeState(): SessionModeState {
+    return { currentModeId: this.mode, availableModes: this.modes };
   }
 
   get pane(): string {
@@ -80,9 +103,14 @@ export class Session implements HookHost {
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
     const placement = await placePane(config, id, params.cwd);
-    const session = new Session(config, ctx.client, id, params.cwd, placement);
+    const mode = await config.driver.initialMode(config.extraArgs);
+    const session = new Session(config, ctx.client, id, params.cwd, placement, {
+      mode,
+      mcpServers: params.mcpServers,
+      canRestart: true,
+    });
     await session.listenHooks();
-    await session.start({ resume: false, mcpServers: params.mcpServers, trusted });
+    await session.start({ resume: false, trusted });
     return session;
   }
 
@@ -91,21 +119,31 @@ export class Session implements HookHost {
     params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
     ctx: RequestContext,
   ): Promise<Session | null> {
+    const mode = await config.driver.initialMode(config.extraArgs);
     const live = await findLiveAgent(config, params.sessionId);
     if (live) {
-      const session = new Session(config, ctx.client, params.sessionId, live.cwd ?? params.cwd, {
-        paneId: live.pane_id,
-        tabId: null,
-      });
+      const workspace = (await config.herdr.listWorkspaces()).find((ws) => ws.workspace_id === live.workspace_id);
+      const session = new Session(
+        config,
+        ctx.client,
+        params.sessionId,
+        live.cwd ?? params.cwd,
+        { paneId: live.pane_id, tabId: null },
+        { mode, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel },
+      );
       await session.listenHooks();
       return session;
     }
     if (!(await config.driver.transcriptExists(params.sessionId))) return null;
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const placement = await placePane(config, params.sessionId, params.cwd);
-    const session = new Session(config, ctx.client, params.sessionId, params.cwd, placement);
+    const session = new Session(config, ctx.client, params.sessionId, params.cwd, placement, {
+      mode,
+      mcpServers: params.mcpServers,
+      canRestart: true,
+    });
     await session.listenHooks();
-    await session.start({ resume: true, mcpServers: params.mcpServers, trusted });
+    await session.start({ resume: true, trusted });
     return session;
   }
 
@@ -127,13 +165,76 @@ export class Session implements HookHost {
   async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
     if (this.turn) throw new Error(`Session ${this.sessionId} already has a prompt in progress`);
     const text = promptToText(blocks);
-    const turn: Turn = { cancelled: false, streamed: "" };
+    await this.restarting;
+    const turn: Turn = { cancelled: false, streamed: "", continuation: null };
     this.turn = turn;
     try {
       return await this.runTurn(text, turn);
     } finally {
       this.turn = null;
+      const pending = this.takePendingMode();
+      if (pending) this.restarting = this.restartWithMode(pending).catch((error) => this.reportRestartFailure(error));
     }
+  }
+
+  async setMode(modeId: string): Promise<void> {
+    if (!this.modes.some((mode) => mode.id === modeId)) {
+      throw RequestError.invalidParams({ modeId }, `unknown mode: ${modeId}`);
+    }
+    if (!this.canRestart) {
+      throw RequestError.invalidParams(
+        { modeId },
+        `the mode of a session started outside herdr-acp can only be changed in its herdr pane (${this.paneId})`,
+      );
+    }
+    if (this.turn) {
+      this.pendingMode = modeId === this.mode ? null : modeId;
+      return;
+    }
+    await this.restarting;
+    if (modeId === this.mode) return;
+    this.restarting = this.restartWithMode(modeId);
+    await this.restarting;
+  }
+
+  async reportMode(modeId: string): Promise<void> {
+    if (this.pendingMode === modeId) this.pendingMode = null;
+    if (modeId === this.mode || !this.modes.some((mode) => mode.id === modeId)) return;
+    this.mode = modeId;
+    await this.notify({ sessionUpdate: "current_mode_update", currentModeId: modeId });
+  }
+
+  continueWithMode(modeId: string, prompt: string): void {
+    if (this.turn) this.turn.continuation = { modeId, prompt };
+  }
+
+  takePendingMode(): string | null {
+    const pending = this.pendingMode;
+    this.pendingMode = null;
+    return pending;
+  }
+
+  restorePendingMode(modeId: string): void {
+    this.pendingMode ??= modeId;
+  }
+
+  private async restartWithMode(modeId: string): Promise<void> {
+    const { herdr, driver } = this.config;
+    await herdr.prompt(this.paneId, driver.exitCommand);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const agent = await herdr.getAgent(this.paneId).catch(() => null);
+      if (!agent || agent.agent !== driver.kind) break;
+      if (Date.now() > deadline) throw new Error(`${driver.title} did not exit in herdr pane ${this.paneId}`);
+      await sleep(this.config.pollMs);
+    }
+    const resume = await driver.transcriptExists(this.sessionId);
+    await this.start({ resume, trusted: true, mode: modeId });
+    await this.reportMode(modeId);
+  }
+
+  private reportRestartFailure(error: unknown): void {
+    process.stderr.write(`herdr-acp: mode change failed for session ${this.sessionId}: ${String(error)}\n`);
   }
 
   async cancel(): Promise<void> {
@@ -159,6 +260,10 @@ export class Session implements HookHost {
 
   announceToolCall(toolCallId: string): void {
     this.parser.markAnnounced(toolCallId);
+  }
+
+  settleToolCall(toolCallId: string): void {
+    this.parser.markSettled(toolCallId);
   }
 
   async streamText(text: string): Promise<void> {
@@ -201,16 +306,17 @@ export class Session implements HookHost {
     );
   }
 
-  private async start(opts: { resume: boolean; mcpServers: McpServer[]; trusted: boolean }): Promise<void> {
+  private async start(opts: { resume: boolean; trusted: boolean; mode?: string }): Promise<void> {
     const { herdr, driver } = this.config;
     const args = await driver.launchArgs({
       sessionId: this.sessionId,
       resume: opts.resume,
       cwd: this.cwd,
-      mcpServers: opts.mcpServers,
+      mcpServers: this.mcpServers,
       stateDir: this.config.stateDir,
       extraArgs: this.config.extraArgs,
       hookCommand: hookCommand(),
+      ...(opts.mode ? { mode: opts.mode } : {}),
     });
     const deadline = Date.now() + this.config.startTimeoutMs;
     let name = `acp-${this.sessionId.slice(0, 8).toLowerCase()}`;
@@ -266,12 +372,32 @@ export class Session implements HookHost {
   }
 
   private async runTurn(text: string, turn: Turn): Promise<PromptResponse> {
+    const usage = new Map<string, TokenUsage>();
+    const outcome = { stopReason: "end_turn" as StopReason };
+    let next: string | null = text;
+    while (next !== null) {
+      await this.followPrompt(next, turn, usage, outcome);
+      next = null;
+      const continuation = turn.continuation;
+      turn.continuation = null;
+      if (continuation && !turn.cancelled) {
+        await this.restartWithMode(continuation.modeId);
+        next = continuation.prompt;
+      }
+    }
+    return { stopReason: turn.cancelled ? "cancelled" : outcome.stopReason, ...usageResponse(usage) };
+  }
+
+  private async followPrompt(
+    text: string,
+    turn: Turn,
+    usage: Map<string, TokenUsage>,
+    outcome: { stopReason: StopReason },
+  ): Promise<void> {
     const { herdr, driver, pollMs, idleSettleMs } = this.config;
     const agent = await herdr.getAgent(this.paneId);
     const path = await driver.transcriptPath({ sessionId: this.sessionId, cwd: this.cwd, ref: agent.agent_session ?? null });
     const tail = await JsonlTail.atEnd(path);
-    const usage = new Map<string, TokenUsage>();
-    let stopReason: StopReason = "end_turn";
     let sawActivity = false;
     let blockedReported = false;
     let quietSince: number | null = null;
@@ -291,11 +417,11 @@ export class Session implements HookHost {
           if (event.type === "update") {
             if (!isAlreadyStreamed(turn, event.update)) await this.notify(event.update);
           } else if (event.type === "usage") usage.set(event.messageId, event.usage);
-          else if (event.type === "stop_reason") stopReason = event.stopReason;
+          else if (event.type === "stop_reason") outcome.stopReason = event.stopReason;
           else if (event.type === "turn_end") turnEnded = true;
         }
       }
-      if (turnEnded) break;
+      if (turnEnded) return;
 
       const status = (await herdr.getAgent(this.paneId)).agent_status;
       if (status === "working") {
@@ -312,13 +438,11 @@ export class Session implements HookHost {
       } else if (status === "idle" || status === "done") {
         if (sawActivity || turn.cancelled || Date.now() - startedAt > 10_000) {
           quietSince ??= Date.now();
-          if (Date.now() - quietSince >= idleSettleMs) break;
+          if (Date.now() - quietSince >= idleSettleMs) return;
         }
       }
       await sleep(pollMs);
     }
-
-    return { stopReason: turn.cancelled ? "cancelled" : stopReason, ...usageResponse(usage) };
   }
 }
 

@@ -1,10 +1,17 @@
+import { accessSync, constants } from "node:fs";
 import { mkdir, unlink } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MAX_SOCKET_PATH = 100;
+
+export const GLOBAL_HOOK_MARKER = "herdr-acp-hook";
+
+export function defaultStateDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "herdr-acp");
+}
 
 export function socketPath(stateDir: string, sessionId: string): string {
   const preferred = join(stateDir, "s", `${sessionId}.sock`);
@@ -12,9 +19,22 @@ export function socketPath(stateDir: string, sessionId: string): string {
   return join(tmpdir(), `herdr-acp-${process.getuid?.() ?? "u"}`, `${sessionId}.sock`);
 }
 
-export function hookCommand(): string {
+export function hookCommand(options: { global?: boolean } = {}): string {
   const script = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./hook.ts" : "./hook.js", import.meta.url));
-  return `${shellQuote(process.execPath)} ${shellQuote(script)}`;
+  const node = options.global ? (nodeOnPath() ?? process.execPath) : process.execPath;
+  const command = `${shellQuote(node)} ${shellQuote(script)}`;
+  return options.global ? `${command} ${GLOBAL_HOOK_MARKER}` : command;
+}
+
+function nodeOnPath(): string | null {
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    const candidate = join(dir, "node");
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return null;
 }
 
 function shellQuote(value: string): string {

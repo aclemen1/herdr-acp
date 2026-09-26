@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { McpServer, PlanEntry, SessionUpdate } from "@agentclientprotocol/sdk";
 import { claudeHookSettings, createClaudeHookHandler } from "./claude-hooks.ts";
+import { claudeInitialMode, claudeModes, withoutPermissionModeArg } from "./claude-modes.ts";
+import { claudeUserSettingsPath, hasGlobalHerdrAcpHooks, installGlobalHooks, uninstallGlobalHooks } from "./claude-settings.ts";
 import { toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
 import { isClaudeFolderTrusted } from "./claude-trust.ts";
 import type { Driver, DriverEvent, HookHost, LaunchInput, TokenUsage, TranscriptParser } from "./types.ts";
@@ -28,8 +30,32 @@ export class ClaudeDriver implements Driver {
       args.push("--mcp-config", path);
     }
     const { settings, rest } = await extractSettings(input.extraArgs);
-    args.push("--settings", JSON.stringify(mergeSettings(settings, claudeHookSettings(input.hookCommand))));
+    const hooks = (await hasGlobalHerdrAcpHooks()) ? {} : claudeHookSettings(input.hookCommand);
+    args.push("--settings", JSON.stringify(mergeSettings(settings, hooks)));
+    if (input.mode) return [...args, ...withoutPermissionModeArg(rest), "--permission-mode", input.mode];
     return [...args, ...rest];
+  }
+
+  readonly exitCommand = "/exit";
+
+  availableModes(extraArgs: string[]) {
+    return claudeModes(extraArgs);
+  }
+
+  initialMode(extraArgs: string[]) {
+    return claudeInitialMode(extraArgs);
+  }
+
+  async installGlobalHooks(command: string): Promise<string> {
+    const path = claudeUserSettingsPath();
+    await installGlobalHooks(command, path);
+    return path;
+  }
+
+  async uninstallGlobalHooks(): Promise<string> {
+    const path = claudeUserSettingsPath();
+    await uninstallGlobalHooks(path);
+    return path;
   }
 
   async transcriptPath(input: { sessionId: string; cwd: string; ref: { kind: string; value: string } | null }) {
@@ -136,15 +162,27 @@ type Rec = {
   subtype?: string;
   isSidechain?: boolean;
   isMeta?: boolean;
-  message?: { id?: string; role?: string; content?: unknown; stop_reason?: string; usage?: Record<string, unknown> };
+  message?: {
+    id?: string;
+    role?: string;
+    model?: string;
+    content?: unknown;
+    stop_reason?: string;
+    usage?: Record<string, unknown>;
+  };
 };
 
 export class ClaudeTranscriptParser implements TranscriptParser {
   private readonly openToolCalls = new Set<string>();
   private readonly announced = new Set<string>();
+  private readonly settled = new Set<string>();
 
   markAnnounced(toolCallId: string): void {
     this.announced.add(toolCallId);
+  }
+
+  markSettled(toolCallId: string): void {
+    this.settled.add(toolCallId);
   }
 
   parse(raw: unknown, options: { replay: boolean }): DriverEvent[] {
@@ -158,7 +196,7 @@ export class ClaudeTranscriptParser implements TranscriptParser {
 
   private parseAssistant(record: Rec): DriverEvent[] {
     const message = record.message;
-    if (!message) return [];
+    if (!message || message.model === "<synthetic>") return [];
     const events: DriverEvent[] = [];
     for (const block of asBlocks(message.content)) {
       if (block.type === "text" && typeof block.text === "string" && block.text) {
@@ -207,7 +245,7 @@ export class ClaudeTranscriptParser implements TranscriptParser {
     for (const block of asBlocks(content)) {
       if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
         const wasOpen = this.openToolCalls.delete(block.tool_use_id);
-        if (!wasOpen && !replay) continue;
+        if ((!wasOpen || this.settled.delete(block.tool_use_id)) && !replay) continue;
         const text = truncate(toolResultText(block.content));
         events.push(
           update({

@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
@@ -9,10 +7,15 @@ import { createAgent } from "./agent.ts";
 import { ClaudeDriver } from "./drivers/claude.ts";
 import type { Driver } from "./drivers/types.ts";
 import { Herdr } from "./herdr.ts";
+import { defaultStateDir, hookCommand } from "./hook-bridge.ts";
 
 const USAGE = `Usage: herdr-acp [options] [-- <agent args>...]
+       herdr-acp install-hooks [--agent <kind>]
+       herdr-acp uninstall-hooks [--agent <kind>]
 
 ACP server over stdio. Each ACP session runs an interactive agent in its own herdr tab.
+install-hooks adds the herdr-acp hooks to the agent's user settings, so that sessions started
+outside herdr-acp can be driven over ACP too. The hooks do nothing while no herdr-acp is attached.
 
 Options:
   --agent <kind>          Agent kind (default: claude)
@@ -31,7 +34,10 @@ const DRIVERS: Record<string, () => Driver> = {
   claude: () => new ClaudeDriver(),
 };
 
+const command = process.argv[2] === "install-hooks" || process.argv[2] === "uninstall-hooks" ? process.argv[2] : null;
+
 const { values, positionals } = parseArgs({
+  args: process.argv.slice(command ? 3 : 2),
   allowPositionals: true,
   options: {
     agent: { type: "string" },
@@ -58,6 +64,16 @@ if (!makeDriver) {
   process.exit(2);
 }
 
+if (command) {
+  const driver = makeDriver();
+  const path =
+    command === "install-hooks"
+      ? await driver.installGlobalHooks(hookCommand({ global: true }))
+      : await driver.uninstallGlobalHooks();
+  process.stderr.write(`herdr-acp: ${command === "install-hooks" ? "installed hooks in" : "removed hooks from"} ${path}\n`);
+  process.exit(0);
+}
+
 const { app, disposeAll } = createAgent(
   {
     herdr: new Herdr({
@@ -68,7 +84,7 @@ const { app, disposeAll } = createAgent(
     workspaceLabel: values.workspace ?? env.HERDR_ACP_WORKSPACE ?? "acp",
     paneEnv: selectEnv(values["forward-env"] ?? env.HERDR_ACP_FORWARD_ENV ?? ""),
     extraArgs: positionals,
-    stateDir: join(env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "herdr-acp"),
+    stateDir: defaultStateDir(env),
     startTimeoutMs: Number(values["start-timeout"] ?? 60_000),
     pollMs: 300,
     idleSettleMs: 2_500,
@@ -81,9 +97,13 @@ const { app, disposeAll } = createAgent(
 const connection = app.connect(
   ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>),
 );
+const shutdown = async () => {
+  await disposeAll();
+  process.exit(0);
+};
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => void shutdown());
 await connection.closed;
-await disposeAll();
-process.exit(0);
+await shutdown();
 
 function selectEnv(spec: string): Record<string, string> {
   const patterns = spec.split(",").map((item) => item.trim()).filter(Boolean);

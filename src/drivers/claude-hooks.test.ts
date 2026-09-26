@@ -10,9 +10,14 @@ type FakeHost = HookHost & {
   announced: string[];
   permissions: { title: string; options: string[] }[];
   cancelled: boolean;
+  modes: string[];
+  pending: string | null;
+  continuation: { modeId: string; prompt: string } | null;
 };
 
-function fakeHost(opts: { elicit?: CreateElicitationResponse | null; permission?: (string | null)[] } = {}): FakeHost {
+function fakeHost(
+  opts: { elicit?: CreateElicitationResponse | null; permission?: (string | null)[]; pending?: string } = {},
+): FakeHost {
   const choices = [...(opts.permission ?? [])];
   const host: FakeHost = {
     sessionId: "s1",
@@ -21,12 +26,30 @@ function fakeHost(opts: { elicit?: CreateElicitationResponse | null; permission?
     announced: [],
     permissions: [],
     cancelled: false,
+    modes: [],
+    pending: opts.pending ?? null,
+    continuation: null,
+    continueWithMode: (modeId, prompt) => {
+      host.continuation = { modeId, prompt };
+    },
+    reportMode: async (mode) => {
+      host.modes.push(mode);
+    },
+    takePendingMode: () => {
+      const pending = host.pending;
+      host.pending = null;
+      return pending;
+    },
+    restorePendingMode: (mode) => {
+      host.pending ??= mode;
+    },
     notify: async (update) => {
       host.updates.push(update);
     },
     announceToolCall: (id) => {
       host.announced.push(id);
     },
+    settleToolCall: () => {},
     streamText: async (text) => {
       host.streamed.push(text);
     },
@@ -154,4 +177,56 @@ test("streams message deltas and separates paragraphs", async () => {
   await handle({ hook_event_name: "MessageDisplay", message_id: "m", index: 1, delta: "Deux." });
   await handle({ hook_event_name: "MessageDisplay", message_id: "n", index: 0, delta: "Trois." });
   assert.deepEqual(host.streamed, ["Un.", "\n\nDeux.", "Trois."]);
+});
+
+test("reports the live permission mode from hook inputs", async () => {
+  const host = fakeHost();
+  await createClaudeHookHandler(host)({ hook_event_name: "UserPromptSubmit", permission_mode: "plan" });
+  assert.deepEqual(host.modes, ["plan"]);
+});
+
+test("applies a pending accept-edits mode to an edit without asking", async () => {
+  const host = fakeHost({ pending: "acceptEdits" });
+  const output = await createClaudeHookHandler(host)({ hook_event_name: "PermissionRequest", tool_name: "Write", tool_input: {} });
+  assert.deepEqual(output, {
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: { behavior: "allow", updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] },
+    },
+  });
+  assert.deepEqual(host.permissions, []);
+  assert.deepEqual(host.modes, ["acceptEdits"]);
+});
+
+test("keeps a pending mode when the user rejects the tool call", async () => {
+  const host = fakeHost({ pending: "default", permission: ["reject"] });
+  await createClaudeHookHandler(host)({ hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "x" } });
+  assert.equal(host.pending, "default");
+});
+
+test("turns a plan approval into a restart in the chosen mode", async () => {
+  const host = fakeHost({ permission: ["acceptEdits"] });
+  const output = (await createClaudeHookHandler(host)({
+    hook_event_name: "PreToolUse",
+    tool_name: "ExitPlanMode",
+    tool_use_id: "tp1",
+    tool_input: { plan: "1. Do it" },
+  })) as { continue: boolean; hookSpecificOutput: { permissionDecision: string } };
+  assert.deepEqual(host.permissions, [{ title: "Ready to code?", options: ["acceptEdits", "default", "plan"] }]);
+  assert.equal(output.continue, false);
+  assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
+  assert.deepEqual(host.continuation, { modeId: "acceptEdits", prompt: "The user approved your plan. Implement it now." });
+  assert.equal(host.updates.at(-1)?.sessionUpdate, "tool_call_update");
+});
+
+test("keeps planning when the user rejects the plan", async () => {
+  const host = fakeHost({ permission: ["plan"] });
+  const output = (await createClaudeHookHandler(host)({
+    hook_event_name: "PreToolUse",
+    tool_name: "ExitPlanMode",
+    tool_use_id: "tp2",
+    tool_input: { plan: "1. Do it" },
+  })) as { hookSpecificOutput: { permissionDecision: string } };
+  assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(host.continuation, null);
 });

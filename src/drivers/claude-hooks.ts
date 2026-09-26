@@ -1,10 +1,12 @@
 import type { ElicitationSchema, PermissionOption } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 import { elicitationContent } from "../elicitation.ts";
+import { modeAllowsTool } from "./claude-modes.ts";
 import { toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
 import type { HookHandler, HookHost } from "./types.ts";
 
 const INTERACTIVE_HOOK_TIMEOUT_S = 3600;
+const PLAN_APPROVED_PROMPT = "The user approved your plan. Implement it now.";
 
 export function claudeHookSettings(command: string) {
   const handler = (timeout?: number) => [{ type: "command", command, ...(timeout ? { timeout } : {}) }];
@@ -13,6 +15,7 @@ export function claudeHookSettings(command: string) {
       PreToolUse: [{ matcher: "*", hooks: handler(INTERACTIVE_HOOK_TIMEOUT_S) }],
       PermissionRequest: [{ matcher: "*", hooks: handler(INTERACTIVE_HOOK_TIMEOUT_S) }],
       MessageDisplay: [{ hooks: handler() }],
+      UserPromptSubmit: [{ hooks: handler() }],
     },
   };
 }
@@ -23,6 +26,7 @@ type HookInput = {
   tool_input?: Record<string, unknown>;
   tool_use_id?: string;
   permission_suggestions?: unknown[] | null;
+  permission_mode?: string;
   message_id?: string;
   index?: number;
   delta?: string;
@@ -41,6 +45,7 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
 
   return async (raw) => {
     const input = raw as HookInput;
+    if (input.permission_mode) await host.reportMode(input.permission_mode);
     switch (input.hook_event_name) {
       case "MessageDisplay": {
         if (typeof input.delta !== "string" || !input.delta) return null;
@@ -69,6 +74,7 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
           });
         }
         if (name === "AskUserQuestion") return answerQuestions(host, input.tool_input ?? {}, id);
+        if (name === "ExitPlanMode") return decideExitPlan(host, input, id);
         return null;
       }
       case "PermissionRequest":
@@ -83,34 +89,95 @@ function toolKey(name: string, input: unknown): string {
   return `${name}\u0000${JSON.stringify(input ?? null)}`;
 }
 
+function permissionOutput(decision: Record<string, unknown>) {
+  return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision } };
+}
+
+function setMode(mode: string) {
+  return { type: "setMode", mode, destination: "session" };
+}
+
 async function decidePermission(host: HookHost, input: HookInput, toolCallId: string | undefined) {
   const name = input.tool_name ?? "tool";
+  const toolCall = {
+    toolCallId: toolCallId ?? `permission-${randomUUID()}`,
+    title: toolTitle(name, input.tool_input),
+    kind: toolKind(name),
+    status: "pending" as const,
+    rawInput: input.tool_input,
+  };
+  const pending = host.takePendingMode();
+  if (pending && modeAllowsTool(pending, name)) {
+    await host.reportMode(pending);
+    return permissionOutput({ behavior: "allow", updatedPermissions: [setMode(pending)] });
+  }
   const suggestions = Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [];
   const options: PermissionOption[] = [
     { optionId: "allow", name: "Allow", kind: "allow_once" },
     ...(suggestions.length > 0 ? [{ optionId: "allow_always", name: "Always allow", kind: "allow_always" as const }] : []),
     { optionId: "reject", name: "Reject", kind: "reject_once" },
   ];
-  const choice = await host.requestPermission(
-    {
-      toolCallId: toolCallId ?? `permission-${randomUUID()}`,
-      title: toolTitle(name, input.tool_input),
-      kind: toolKind(name),
-      status: "pending",
-      rawInput: input.tool_input,
-    },
-    options,
-  );
-  const output = (decision: Record<string, unknown>) => ({
-    hookSpecificOutput: { hookEventName: "PermissionRequest", decision },
-  });
+  const choice = await host.requestPermission(toolCall, options);
+  if (choice === "allow" || choice === "allow_always") {
+    const updates = [...(choice === "allow_always" ? suggestions : []), ...(pending ? [setMode(pending)] : [])];
+    if (pending) await host.reportMode(pending);
+    return permissionOutput({ behavior: "allow", ...(updates.length > 0 ? { updatedPermissions: updates } : {}) });
+  }
+  if (pending) host.restorePendingMode(pending);
   if (choice === null) {
     host.markCancelled();
-    return output({ behavior: "deny", message: "Cancelled by the ACP client.", interrupt: true });
+    return permissionOutput({ behavior: "deny", message: "Cancelled by the ACP client.", interrupt: true });
   }
-  if (choice === "allow") return output({ behavior: "allow" });
-  if (choice === "allow_always") return output({ behavior: "allow", updatedPermissions: suggestions });
-  return output({ behavior: "deny", message: "Rejected by the ACP client." });
+  return permissionOutput({ behavior: "deny", message: "Rejected by the ACP client." });
+}
+
+async function decideExitPlan(host: HookHost, input: HookInput, toolCallId: string | undefined) {
+  const plan = typeof input.tool_input?.plan === "string" ? input.tool_input.plan : "";
+  const choice = await host.requestPermission(
+    {
+      toolCallId: toolCallId ?? `plan-${randomUUID()}`,
+      title: "Ready to code?",
+      kind: "switch_mode",
+      status: "pending",
+      rawInput: input.tool_input,
+      ...(plan ? { content: [{ type: "content", content: { type: "text", text: plan } }] } : {}),
+    },
+    [
+      { optionId: "acceptEdits", name: "Yes, and auto-accept edits", kind: "allow_always" },
+      { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+      { optionId: "plan", name: "No, keep planning", kind: "reject_once" },
+    ],
+  );
+  const output = (decision: "allow" | "deny", reason?: string) => ({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: decision,
+      ...(reason ? { permissionDecisionReason: reason } : {}),
+    },
+  });
+  if (choice === "acceptEdits" || choice === "default") {
+    host.takePendingMode();
+    host.continueWithMode(choice, PLAN_APPROVED_PROMPT);
+    if (toolCallId) {
+      host.settleToolCall(toolCallId);
+      await host.notify({
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: `Plan approved (${choice})` } }],
+      });
+    }
+    return {
+      continue: false,
+      stopReason: "Plan approved in the ACP client.",
+      ...output("deny", "The user approved the plan in the ACP client. Claude restarts outside plan mode to implement it."),
+    };
+  }
+  if (choice === null) {
+    host.markCancelled();
+    return { continue: false, stopReason: "Cancelled by the ACP client." };
+  }
+  return output("deny", "The user wants to keep planning.");
 }
 
 export function questionsSchema(questions: Question[]): ElicitationSchema {
