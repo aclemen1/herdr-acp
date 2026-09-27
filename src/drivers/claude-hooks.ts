@@ -115,6 +115,17 @@ export function statusFromInput(input: HookInput) {
   };
 }
 
+export function alwaysAllowLabel(suggestions: unknown[]): string {
+  const rules = suggestions.flatMap((suggestion) => {
+    const item = suggestion as { rules?: { toolName?: string; ruleContent?: string }[]; directories?: string[] };
+    return [
+      ...(item.rules ?? []).map((rule) => (rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : String(rule.toolName))),
+      ...(item.directories ?? []),
+    ];
+  });
+  return rules.length > 0 ? `Always allow ${rules.join(", ")}` : "Always allow";
+}
+
 function toolKey(name: string, input: unknown): string {
   return `${name}\u0000${JSON.stringify(input ?? null)}`;
 }
@@ -144,7 +155,7 @@ async function decidePermission(host: HookHost, input: HookInput, toolCallId: st
   const suggestions = Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [];
   const options: PermissionOption[] = [
     { optionId: "allow", name: "Allow", kind: "allow_once" },
-    ...(suggestions.length > 0 ? [{ optionId: "allow_always", name: "Always allow", kind: "allow_always" as const }] : []),
+    ...(suggestions.length > 0 ? [{ optionId: "allow_always", name: alwaysAllowLabel(suggestions), kind: "allow_always" as const }] : []),
     { optionId: "reject", name: "Reject", kind: "reject_once" },
   ];
   const choice = await host.requestPermission(toolCall, options);

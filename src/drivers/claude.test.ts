@@ -124,3 +124,31 @@ test("skips synthetic messages and results of settled tool calls", () => {
   const result = { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t5", content: "denied", is_error: true }] } };
   assert.deepEqual(parser.parse(result, { replay: false }), []);
 });
+
+test("turns the skill listing into available commands", () => {
+  const parser = new ClaudeTranscriptParser();
+  const listing = {
+    type: "attachment",
+    attachment: { type: "skill_listing", isInitial: true, content: "- review: Review a diff\n- plugin:deploy: Deploy it" },
+  };
+  const [event] = parser.parse(listing, { replay: false });
+  assert.deepEqual(event, {
+    type: "update",
+    update: {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "compact", description: "Summarize the conversation to free context" },
+        { name: "review", description: "Review a diff" },
+        { name: "plugin:deploy", description: "Deploy it" },
+      ],
+    },
+  });
+  assert.deepEqual(parser.parse(listing, { replay: false }), []);
+});
+
+test("ignores records written before the current turn", () => {
+  const parser = new ClaudeTranscriptParser();
+  const old = { type: "system", subtype: "turn_duration", timestamp: "2026-01-01T00:00:00.000Z" };
+  assert.deepEqual(parser.parse(old, { replay: false, since: Date.parse("2026-06-01T00:00:00Z") }), []);
+  assert.equal(parser.parse(old, { replay: false })[0]?.type, "turn_end");
+});

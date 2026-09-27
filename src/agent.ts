@@ -40,7 +40,7 @@ export function createAgent(config: SessionConfig, version: string) {
           loadSession: true,
           promptCapabilities: { image: true, audio: false, embeddedContext: true },
           mcpCapabilities: { http: true, sse: true },
-          sessionCapabilities: { list: {}, close: {}, resume: {} },
+          sessionCapabilities: { list: {}, close: {}, resume: {}, fork: {} },
         },
         authMethods: [],
       };
@@ -56,9 +56,18 @@ export function createAgent(config: SessionConfig, version: string) {
       await session.replayHistory();
       return describe(session);
     })
-    .onRequest("session/resume", async ({ params, client, requestId }) =>
-      describe(await attach(params, { client, requestId })),
-    )
+    .onRequest("session/resume", async ({ params, client, requestId }) => {
+      const session = await attach(params, { client, requestId });
+      await session.announceCommands();
+      return describe(session);
+    })
+    .onRequest("session/fork", async ({ params, client, requestId }) => {
+      const session = await Session.fork(config, { ...params, mcpServers: params.mcpServers ?? [] }, { client, requestId });
+      if (!session) throw RequestError.resourceNotFound(params.sessionId);
+      sessions.set(session.sessionId, session);
+      await session.announceCommands();
+      return { sessionId: session.sessionId, ...describe(session) };
+    })
     .onRequest("session/set_mode", async ({ params }) => {
       await getSession(params.sessionId).setMode(params.modeId);
       return {};

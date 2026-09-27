@@ -130,7 +130,38 @@ export class Session implements HookHost {
       canRestart: true,
     });
     await session.listenHooks();
-    await session.start({ resume: false, trusted });
+    try {
+      await session.start({ resume: false, trusted });
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
+    await session.waitForStatus();
+    return session;
+  }
+
+  static async fork(
+    config: SessionConfig,
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
+    ctx: RequestContext,
+  ): Promise<Session | null> {
+    if (!(await config.driver.transcriptExists(params.sessionId))) return null;
+    const trusted = await ensureTrust(config, params.cwd, ctx);
+    const id = config.driver.newSessionId();
+    const placement = await placePane(config, id, params.cwd);
+    const settings = await config.driver.initialSettings(config.extraArgs);
+    const session = new Session(config, ctx.client, id, params.cwd, placement, {
+      settings,
+      mcpServers: params.mcpServers,
+      canRestart: true,
+    });
+    await session.listenHooks();
+    try {
+      await session.start({ resume: false, trusted, forkFrom: params.sessionId });
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     await session.waitForStatus();
     return session;
   }
@@ -164,12 +195,25 @@ export class Session implements HookHost {
       canRestart: true,
     });
     await session.listenHooks();
-    await session.start({ resume: true, trusted });
+    try {
+      await session.start({ resume: true, trusted });
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     await session.waitForStatus();
     return session;
   }
 
-  async replayHistory(): Promise<void> {
+  async announceCommands(): Promise<void> {
+    let latest: SessionUpdate | null = null;
+    await this.readHistory((update) => {
+      if (update.sessionUpdate === "available_commands_update") latest = update;
+    });
+    if (latest) await this.notify(latest);
+  }
+
+  private async readHistory(onUpdate: (update: SessionUpdate) => void | Promise<void>): Promise<void> {
     const agent = await this.config.herdr.getAgent(this.paneId);
     const path = await this.config.driver.transcriptPath({
       sessionId: this.sessionId,
@@ -179,9 +223,13 @@ export class Session implements HookHost {
     const parser = this.config.driver.createParser();
     for (const record of await new JsonlTail(path).readNew()) {
       for (const event of parser.parse(record, { replay: true })) {
-        if (event.type === "update") await this.notify(event.update);
+        if (event.type === "update") await onUpdate(event.update);
       }
     }
+  }
+
+  async replayHistory(): Promise<void> {
+    await this.readHistory((update) => this.notify(update));
   }
 
   async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
@@ -400,7 +448,7 @@ export class Session implements HookHost {
     );
   }
 
-  private async start(opts: { resume: boolean; trusted: boolean; mode?: string }): Promise<void> {
+  private async start(opts: { resume: boolean; trusted: boolean; mode?: string; forkFrom?: string }): Promise<void> {
     const { herdr, driver } = this.config;
     const args = await driver.launchArgs({
       sessionId: this.sessionId,
@@ -413,6 +461,7 @@ export class Session implements HookHost {
       statusLineCommand: statusLineCommand(),
       clientCanElicit: Boolean(this.config.client.capabilities?.elicitation?.form),
       ...(opts.mode ? { mode: opts.mode } : {}),
+      ...(opts.forkFrom ? { forkFrom: opts.forkFrom } : {}),
       ...this.overrides,
     });
     const deadline = Date.now() + this.config.startTimeoutMs;
@@ -514,7 +563,7 @@ export class Session implements HookHost {
         quietSince = null;
       }
       for (const record of records) {
-        for (const event of this.parser.parse(record, { replay: false })) {
+        for (const event of this.parser.parse(record, { replay: false, since: startedAt - 1_000 })) {
           if (event.type === "update") {
             if (!isAlreadyStreamed(turn, event.update)) await this.notify(event.update);
           } else if (event.type === "usage") usage.set(event.messageId, event.usage);

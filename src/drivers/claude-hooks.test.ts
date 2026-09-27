@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CreateElicitationResponse, SessionUpdate } from "@agentclientprotocol/sdk";
-import { answersFromContent, createClaudeHookHandler, type Question, questionsSchema } from "./claude-hooks.ts";
+import { alwaysAllowLabel, answersFromContent, createClaudeHookHandler, type Question, questionsSchema } from "./claude-hooks.ts";
 import type { HookHost, StatusReport } from "./types.ts";
 
 type FakeHost = HookHost & {
@@ -268,4 +268,12 @@ test("announces edits with a diff", async () => {
   });
   const update = host.updates[0] as { content?: unknown };
   assert.deepEqual(update.content, [{ type: "diff", path: "/a.ts", oldText: "x", newText: "y" }]);
+});
+
+test("labels always-allow options with the suggested rules", () => {
+  assert.equal(
+    alwaysAllowLabel([{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "npm test:*" }, { toolName: "Read" }] }]),
+    "Always allow Bash(npm test:*), Read",
+  );
+  assert.equal(alwaysAllowLabel([{ type: "setMode" }]), "Always allow");
 });

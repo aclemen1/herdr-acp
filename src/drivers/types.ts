@@ -26,7 +26,7 @@ export type DriverEvent =
   | { type: "turn_end" };
 
 export interface TranscriptParser {
-  parse(record: unknown, options: { replay: boolean }): DriverEvent[];
+  parse(record: unknown, options: { replay: boolean; since?: number }): DriverEvent[];
   markAnnounced(toolCallId: string): void;
   markSettled(toolCallId: string): void;
 }
@@ -55,6 +55,7 @@ export type LaunchInput = {
   mode?: string;
   model?: string;
   effort?: string;
+  forkFrom?: string;
 };
 
 export interface HookHost {

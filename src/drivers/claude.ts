@@ -13,6 +13,11 @@ import type { Driver, DriverEvent, HookHost, LaunchInput, SessionSettings, Token
 
 const MAX_TOOL_OUTPUT_CHARS = 20_000;
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
+const BUILTIN_COMMANDS: [string, string][] = [["compact", "Summarize the conversation to free context"]];
+
+function sameCommands(a: Map<string, string>, b: Map<string, string>): boolean {
+  return a.size === b.size && [...a].every(([name, description]) => b.get(name) === description);
+}
 
 export class ClaudeDriver implements Driver {
   readonly kind = "claude";
@@ -24,7 +29,11 @@ export class ClaudeDriver implements Driver {
   }
 
   async launchArgs(input: LaunchInput): Promise<string[]> {
-    const args = input.resume ? ["--resume", input.sessionId] : ["--session-id", input.sessionId];
+    const args = input.forkFrom
+      ? ["--resume", input.forkFrom, "--fork-session", "--session-id", input.sessionId]
+      : input.resume
+        ? ["--resume", input.sessionId]
+        : ["--session-id", input.sessionId];
     if (input.mcpServers.length > 0) {
       const path = join(input.stateDir, `${input.sessionId}.mcp.json`);
       await mkdir(input.stateDir, { recursive: true, mode: 0o700 });
@@ -41,7 +50,10 @@ export class ClaudeDriver implements Driver {
         : input.statusLineCommand,
     };
     const hooks = (await hasGlobalHerdrAcpHooks()) ? {} : claudeHookSettings(input.hookCommand);
-    args.push("--settings", JSON.stringify(mergeSettings({ ...settings, statusLine }, hooks)));
+    const settingsPath = join(input.stateDir, `${input.sessionId}.settings.json`);
+    await mkdir(input.stateDir, { recursive: true, mode: 0o700 });
+    await writeFile(settingsPath, JSON.stringify(mergeSettings({ ...settings, statusLine }, hooks), null, 2), { mode: 0o600 });
+    args.push("--settings", settingsPath);
 
     let tail = rest;
     if (input.mode) tail = [...withoutArg(tail, "--permission-mode"), "--permission-mode", input.mode];
@@ -226,6 +238,8 @@ type Rec = {
   subtype?: string;
   isSidechain?: boolean;
   isMeta?: boolean;
+  timestamp?: string;
+  attachment?: { type?: string; content?: unknown; isInitial?: boolean };
   message?: {
     id?: string;
     role?: string;
@@ -240,6 +254,7 @@ export class ClaudeTranscriptParser implements TranscriptParser {
   private readonly openToolCalls = new Map<string, string>();
   private readonly announced = new Set<string>();
   private readonly settled = new Set<string>();
+  private commands = new Map<string, string>();
 
   markAnnounced(toolCallId: string): void {
     this.announced.add(toolCallId);
@@ -249,13 +264,32 @@ export class ClaudeTranscriptParser implements TranscriptParser {
     this.settled.add(toolCallId);
   }
 
-  parse(raw: unknown, options: { replay: boolean }): DriverEvent[] {
+  parse(raw: unknown, options: { replay: boolean; since?: number }): DriverEvent[] {
     const record = raw as Rec;
     if (!record || typeof record !== "object" || record.isSidechain) return [];
+    if (options.since !== undefined && record.timestamp && Date.parse(record.timestamp) < options.since) return [];
     if (record.type === "system" && record.subtype === "turn_duration") return [{ type: "turn_end" }];
     if (record.type === "assistant") return this.parseAssistant(record);
+    if (record.type === "attachment") return this.parseAttachment(record.attachment);
     if (record.type === "user") return this.parseUser(record, options.replay);
     return [];
+  }
+
+  private parseAttachment(attachment: Rec["attachment"]): DriverEvent[] {
+    if (attachment?.type !== "skill_listing" || typeof attachment.content !== "string") return [];
+    const next = new Map(attachment.isInitial ? BUILTIN_COMMANDS : this.commands);
+    for (const line of attachment.content.split("\n")) {
+      const match = /^- ([\w:.-]+): (.*)$/.exec(line.trim());
+      if (match) next.set(match[1]!, match[2]!);
+    }
+    if (sameCommands(next, this.commands)) return [];
+    this.commands = next;
+    return [
+      update({
+        sessionUpdate: "available_commands_update",
+        availableCommands: [...next].map(([name, description]) => ({ name, description })),
+      }),
+    ];
   }
 
   private parseAssistant(record: Rec): DriverEvent[] {

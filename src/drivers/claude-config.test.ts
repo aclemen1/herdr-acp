@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -54,7 +54,10 @@ test("builds launch arguments with status line wrapper, settings and restriction
       mode: "plan",
       effort: "max",
     });
-    const settings = JSON.parse(args[args.indexOf("--settings") + 1]!) as { statusLine: unknown; hooks: object };
+    const settings = JSON.parse(await readFile(args[args.indexOf("--settings") + 1]!, "utf8")) as {
+      statusLine: unknown;
+      hooks: object;
+    };
     assert.deepEqual(settings.statusLine, {
       type: "command",
       command: `wrap ${Buffer.from("my-status").toString("base64url")}`,
@@ -100,4 +103,22 @@ test("always exposes effort, with a default value when unknown", () => {
     (option) => option.id === "effort",
   );
   assert.ok(effort?.type === "select" && effort.currentValue === "default");
+});
+
+test("forks a stored session under a new id", async () => {
+  await withConfigDir({}, async () => {
+    const args = await new ClaudeDriver().launchArgs({
+      sessionId: "new-id",
+      resume: false,
+      forkFrom: "old-id",
+      cwd: "/tmp",
+      mcpServers: [],
+      stateDir: tmpdir(),
+      extraArgs: [],
+      hookCommand: "hook",
+      statusLineCommand: "wrap",
+      clientCanElicit: true,
+    });
+    assert.deepEqual(args.slice(0, 5), ["--resume", "old-id", "--fork-session", "--session-id", "new-id"]);
+  });
 });

@@ -20,6 +20,7 @@ const { values, positionals } = parseArgs({
     "set-mode": { type: "string" },
     config: { type: "string", multiple: true },
     resume: { type: "string" },
+    fork: { type: "string" },
     image: { type: "string" },
     list: { type: "boolean", default: false },
   },
@@ -84,6 +85,9 @@ await acp
       case "current_mode_update":
         log("current_mode_update", update.currentModeId);
         break;
+      case "available_commands_update":
+        log("available_commands_update", update.availableCommands.map((command) => command.name).slice(0, 8));
+        break;
       case "usage_update":
         log("usage_update", { used: update.used, size: update.size });
         break;
@@ -103,7 +107,11 @@ await acp
       });
       log("INITIALIZE", init.agentInfo);
       let sessionId: string;
-      if (values.resume) {
+      if (values.fork) {
+        const forked = await ctx.request("session/fork", { sessionId: values.fork, cwd: values.cwd!, mcpServers: [] });
+        sessionId = forked.sessionId;
+        log("FORKED", { from: values.fork, sessionId });
+      } else if (values.resume) {
         const resumed = await ctx.request("session/resume", { sessionId: values.resume, cwd: values.cwd!, mcpServers: [] });
         sessionId = values.resume;
         log("RESUMED", summarize(resumed.configOptions));
