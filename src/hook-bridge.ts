@@ -26,6 +26,13 @@ export function hookCommand(options: { global?: boolean } = {}): string {
   return options.global ? `${command} ${GLOBAL_HOOK_MARKER}` : command;
 }
 
+export function statusLineCommand(): string {
+  const script = fileURLToPath(
+    new URL(import.meta.url.endsWith(".ts") ? "./statusline.ts" : "./statusline.js", import.meta.url),
+  );
+  return `${shellQuote(process.execPath)} ${shellQuote(script)}`;
+}
+
 function nodeOnPath(): string | null {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     const candidate = join(dir, "node");

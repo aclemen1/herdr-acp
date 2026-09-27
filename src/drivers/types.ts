@@ -3,6 +3,7 @@ import type {
   ElicitationSchema,
   McpServer,
   PermissionOption,
+  SessionConfigOption,
   SessionMode,
   SessionUpdate,
   StopReason,
@@ -30,6 +31,17 @@ export interface TranscriptParser {
   markSettled(toolCallId: string): void;
 }
 
+export type SessionSettings = { mode: string; model: string; effort: string | null };
+
+export type StatusReport = {
+  contextUsed?: number;
+  contextSize?: number;
+  modelId?: string;
+  modelLabel?: string;
+  effort?: string;
+  rateLimits?: Record<string, unknown>;
+};
+
 export type LaunchInput = {
   sessionId: string;
   resume: boolean;
@@ -38,7 +50,11 @@ export type LaunchInput = {
   stateDir: string;
   extraArgs: string[];
   hookCommand: string;
+  statusLineCommand: string;
+  clientCanElicit: boolean;
   mode?: string;
+  model?: string;
+  effort?: string;
 };
 
 export interface HookHost {
@@ -48,7 +64,9 @@ export interface HookHost {
   settleToolCall(toolCallId: string): void;
   streamText(text: string): Promise<void>;
   requestPermission(toolCall: ToolCallUpdate, options: PermissionOption[]): Promise<string | null>;
+  availableModeIds(): string[];
   reportMode(modeId: string): Promise<void>;
+  reportStatus(status: StatusReport): Promise<void>;
   takePendingMode(): string | null;
   restorePendingMode(modeId: string): void;
   continueWithMode(modeId: string, prompt: string): void;
@@ -65,6 +83,7 @@ export interface Driver {
   launchArgs(input: LaunchInput): Promise<string[]>;
   transcriptPath(input: { sessionId: string; cwd: string; ref: AgentSessionRef | null }): Promise<string>;
   transcriptExists(sessionId: string): Promise<boolean>;
+  listTranscripts(cwd: string): Promise<{ sessionId: string; title: string | null; updatedAt: string }[]>;
   createParser(): TranscriptParser;
   createHookHandler(host: HookHost): HookHandler;
   isFolderTrusted(cwd: string): Promise<boolean>;
@@ -72,6 +91,8 @@ export interface Driver {
   installGlobalHooks(command: string): Promise<string>;
   uninstallGlobalHooks(): Promise<string>;
   availableModes(extraArgs: string[]): SessionMode[];
-  initialMode(extraArgs: string[]): Promise<string>;
+  initialSettings(extraArgs: string[]): Promise<SessionSettings>;
+  configOptions(settings: SessionSettings, modes: SessionMode[], modelLabel: string | null): SessionConfigOption[];
+  readonly protectedEnv: RegExp;
   readonly exitCommand: string;
 }

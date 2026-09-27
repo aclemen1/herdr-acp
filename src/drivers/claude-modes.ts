@@ -1,11 +1,13 @@
 import { readFile } from "node:fs/promises";
 import type { SessionMode } from "@agentclientprotocol/sdk";
+import { argValue } from "./claude-config.ts";
 import { claudeUserSettingsPath } from "./claude-settings.ts";
 
 const MODES: SessionMode[] = [
   { id: "default", name: "Default", description: "Ask before edits and commands" },
   { id: "acceptEdits", name: "Accept edits", description: "Edit files without asking" },
   { id: "plan", name: "Plan", description: "Explore and plan without making changes" },
+  { id: "auto", name: "Auto", description: "Let Claude decide when to ask" },
   { id: "dontAsk", name: "Don't ask", description: "Deny every tool call that is not pre-approved" },
 ];
 
@@ -19,23 +21,8 @@ export function claudeModes(extraArgs: string[]): SessionMode[] {
 }
 
 export function permissionModeArg(extraArgs: string[]): string | undefined {
-  for (let i = 0; i < extraArgs.length; i++) {
-    const arg = extraArgs[i]!;
-    if (arg === "--permission-mode") return extraArgs[i + 1];
-    if (arg.startsWith("--permission-mode=")) return arg.slice("--permission-mode=".length);
-    if (arg === "--dangerously-skip-permissions") return "bypassPermissions";
-  }
-  return undefined;
-}
-
-export function withoutPermissionModeArg(extraArgs: string[]): string[] {
-  const rest: string[] = [];
-  for (let i = 0; i < extraArgs.length; i++) {
-    const arg = extraArgs[i]!;
-    if (arg === "--permission-mode") i++;
-    else if (!arg.startsWith("--permission-mode=")) rest.push(arg);
-  }
-  return rest;
+  if (extraArgs.includes("--dangerously-skip-permissions")) return argValue(extraArgs, "--permission-mode") ?? "bypassPermissions";
+  return argValue(extraArgs, "--permission-mode");
 }
 
 export async function claudeInitialMode(extraArgs: string[], settingsPath = claudeUserSettingsPath()): Promise<string> {

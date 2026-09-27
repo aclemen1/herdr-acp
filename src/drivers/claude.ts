@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { McpServer, PlanEntry, SessionUpdate } from "@agentclientprotocol/sdk";
+import type { McpServer, PlanEntry, SessionMode, SessionUpdate } from "@agentclientprotocol/sdk";
+import { argValue, claudeConfigOptions, claudeInitialModel, readUserSettings, withoutArg } from "./claude-config.ts";
 import { claudeHookSettings, createClaudeHookHandler } from "./claude-hooks.ts";
-import { claudeInitialMode, claudeModes, withoutPermissionModeArg } from "./claude-modes.ts";
+import { claudeInitialMode, claudeModes } from "./claude-modes.ts";
 import { claudeUserSettingsPath, hasGlobalHerdrAcpHooks, installGlobalHooks, uninstallGlobalHooks } from "./claude-settings.ts";
-import { toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
+import { toolContent, toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
 import { isClaudeFolderTrusted } from "./claude-trust.ts";
-import type { Driver, DriverEvent, HookHost, LaunchInput, TokenUsage, TranscriptParser } from "./types.ts";
+import type { Driver, DriverEvent, HookHost, LaunchInput, SessionSettings, TokenUsage, TranscriptParser } from "./types.ts";
 
 const MAX_TOOL_OUTPUT_CHARS = 20_000;
+const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
 
 export class ClaudeDriver implements Driver {
   readonly kind = "claude";
@@ -30,20 +32,59 @@ export class ClaudeDriver implements Driver {
       args.push("--mcp-config", path);
     }
     const { settings, rest } = await extractSettings(input.extraArgs);
+    const original = (settings.statusLine ?? (await readUserSettings()).statusLine) as StatusLine | undefined;
+    const statusLine: StatusLine = {
+      ...(original ?? {}),
+      type: "command",
+      command: original?.command
+        ? `${input.statusLineCommand} ${Buffer.from(original.command).toString("base64url")}`
+        : input.statusLineCommand,
+    };
     const hooks = (await hasGlobalHerdrAcpHooks()) ? {} : claudeHookSettings(input.hookCommand);
-    args.push("--settings", JSON.stringify(mergeSettings(settings, hooks)));
-    if (input.mode) return [...args, ...withoutPermissionModeArg(rest), "--permission-mode", input.mode];
-    return [...args, ...rest];
+    args.push("--settings", JSON.stringify(mergeSettings({ ...settings, statusLine }, hooks)));
+
+    let tail = rest;
+    if (input.mode) tail = [...withoutArg(tail, "--permission-mode"), "--permission-mode", input.mode];
+    const model = input.model ?? (argValue(tail, "--model") ? undefined : process.env.ANTHROPIC_MODEL);
+    if (model) tail = [...withoutArg(tail, "--model"), ...(model === "default" ? [] : ["--model", model])];
+    if (input.effort) tail = [...withoutArg(tail, "--effort"), ...(input.effort === "default" ? [] : ["--effort", input.effort])];
+    if (!input.clientCanElicit) tail = [...tail, "--disallowedTools", "AskUserQuestion"];
+    return [...args, ...tail];
   }
 
   readonly exitCommand = "/exit";
+  readonly protectedEnv = /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDECODE|CLAUDE_CODE_\w*|CLAUDE_PID|CLAUDE_EFFORT)$/;
 
   availableModes(extraArgs: string[]) {
     return claudeModes(extraArgs);
   }
 
-  initialMode(extraArgs: string[]) {
-    return claudeInitialMode(extraArgs);
+  async initialSettings(extraArgs: string[]): Promise<SessionSettings> {
+    return {
+      mode: await claudeInitialMode(extraArgs),
+      model: await claudeInitialModel(extraArgs),
+      effort: argValue(extraArgs, "--effort") ?? null,
+    };
+  }
+
+  configOptions(settings: SessionSettings, modes: SessionMode[], modelLabel: string | null) {
+    return claudeConfigOptions(settings, modes, modelLabel);
+  }
+
+  async listTranscripts(cwd: string) {
+    const resolved = await realpath(cwd).catch(() => cwd);
+    const dir = join(projectsDir(), encodeProjectDir(resolved));
+    const names = (await readdir(dir).catch(() => [] as string[])).filter((name) => name.endsWith(".jsonl"));
+    const entries = await Promise.all(
+      names.map(async (name) => {
+        const path = join(dir, name);
+        const info = await stat(path);
+        return { sessionId: name.slice(0, -".jsonl".length), title: await lastTitle(path, info.size), updatedAt: info.mtime };
+      }),
+    );
+    return entries
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+      .map((entry) => ({ ...entry, updatedAt: entry.updatedAt.toISOString() }));
   }
 
   async installGlobalHooks(command: string): Promise<string> {
@@ -85,6 +126,29 @@ export class ClaudeDriver implements Driver {
 }
 
 type Settings = Record<string, unknown> & { hooks?: Record<string, unknown[]> };
+type StatusLine = { type: "command"; command: string; padding?: number };
+
+const TITLE_SCAN_BYTES = 256 * 1024;
+
+async function lastTitle(path: string, size: number): Promise<string | null> {
+  const length = Math.min(size, TITLE_SCAN_BYTES);
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    const lines = buffer.toString("utf8").split("\n").reverse();
+    for (const line of lines) {
+      if (!line.includes('"ai-title"')) continue;
+      try {
+        const record = JSON.parse(line) as { type?: string; aiTitle?: string };
+        if (record.type === "ai-title" && record.aiTitle) return record.aiTitle;
+      } catch {}
+    }
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
 
 async function extractSettings(extraArgs: string[]): Promise<{ settings: Settings; rest: string[] }> {
   const rest: string[] = [];
@@ -173,7 +237,7 @@ type Rec = {
 };
 
 export class ClaudeTranscriptParser implements TranscriptParser {
-  private readonly openToolCalls = new Set<string>();
+  private readonly openToolCalls = new Map<string, string>();
   private readonly announced = new Set<string>();
   private readonly settled = new Set<string>();
 
@@ -218,8 +282,9 @@ export class ClaudeTranscriptParser implements TranscriptParser {
     if (name === "TodoWrite" && Array.isArray(args.todos)) {
       return [update({ sessionUpdate: "plan", entries: args.todos.map(toPlanEntry) })];
     }
-    this.openToolCalls.add(id);
+    this.openToolCalls.set(id, name);
     const locations = toolLocations(input);
+    const content = toolContent(name, input);
     const fields = {
       toolCallId: id,
       title: toolTitle(name, input),
@@ -227,6 +292,7 @@ export class ClaudeTranscriptParser implements TranscriptParser {
       status: "in_progress" as const,
       rawInput: input,
       ...(locations ? { locations } : {}),
+      ...(content ? { content } : {}),
     };
     return [
       update(this.announced.has(id) ? { sessionUpdate: "tool_call_update", ...fields } : { sessionUpdate: "tool_call", ...fields }),
@@ -244,9 +310,11 @@ export class ClaudeTranscriptParser implements TranscriptParser {
     }
     for (const block of asBlocks(content)) {
       if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
-        const wasOpen = this.openToolCalls.delete(block.tool_use_id);
-        if ((!wasOpen || this.settled.delete(block.tool_use_id)) && !replay) continue;
-        const text = truncate(toolResultText(block.content));
+        const toolName = this.openToolCalls.get(block.tool_use_id);
+        this.openToolCalls.delete(block.tool_use_id);
+        if ((toolName === undefined || this.settled.delete(block.tool_use_id)) && !replay) continue;
+        const keepsDiff = toolName !== undefined && EDIT_TOOLS.has(toolName) && !block.is_error;
+        const text = keepsDiff ? "" : truncate(toolResultText(block.content));
         events.push(
           update({
             sessionUpdate: "tool_call_update",

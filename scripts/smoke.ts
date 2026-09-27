@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import { parseArgs } from "node:util";
 import * as acp from "@agentclientprotocol/sdk";
@@ -17,6 +18,10 @@ const { values, positionals } = parseArgs({
     "no-forms": { type: "boolean", default: false },
     "trust-folders": { type: "boolean", default: false },
     "set-mode": { type: "string" },
+    config: { type: "string", multiple: true },
+    resume: { type: "string" },
+    image: { type: "string" },
+    list: { type: "boolean", default: false },
   },
 });
 
@@ -27,6 +32,9 @@ if (values["herdr-session"]) args.push("--herdr-session", values["herdr-session"
 if (values["trust-folders"]) args.push("--trust-folders");
 if (values.ask) args.push("--", "--settings", JSON.stringify({ permissions: { ask: [values.ask] } }));
 const child = spawn(process.execPath, args, { stdio: ["pipe", "pipe", "inherit"] });
+
+const summarize = (options: acp.SessionConfigOption[] | null | undefined) =>
+  Object.fromEntries((options ?? []).map((option) => [option.id, option.type === "select" ? option.currentValue : option.currentValue]));
 
 const log = (label: string, detail: unknown = "") =>
   process.stdout.write(`${label} ${typeof detail === "string" ? detail : JSON.stringify(detail)}\n`);
@@ -63,13 +71,24 @@ await acp
         log(update.sessionUpdate, update.content.type === "text" ? update.content.text.slice(0, 200) : update.content.type);
         break;
       case "tool_call":
-        log("tool_call", { id: update.toolCallId, title: update.title, kind: update.kind });
+        log("tool_call", {
+          id: update.toolCallId,
+          title: update.title,
+          kind: update.kind,
+          content: update.content?.map((item) => item.type),
+        });
         break;
       case "tool_call_update":
         log("tool_call_update", { id: update.toolCallId, status: update.status });
         break;
       case "current_mode_update":
         log("current_mode_update", update.currentModeId);
+        break;
+      case "usage_update":
+        log("usage_update", { used: update.used, size: update.size });
+        break;
+      case "config_option_update":
+        log("config_option_update", summarize(update.configOptions));
         break;
       default:
         log(update.sessionUpdate);
@@ -84,19 +103,33 @@ await acp
       });
       log("INITIALIZE", init.agentInfo);
       let sessionId: string;
-      if (values.load) {
+      if (values.resume) {
+        const resumed = await ctx.request("session/resume", { sessionId: values.resume, cwd: values.cwd!, mcpServers: [] });
+        sessionId = values.resume;
+        log("RESUMED", summarize(resumed.configOptions));
+      } else if (values.load) {
         const loaded = await ctx.request("session/load", { sessionId: values.load, cwd: values.cwd!, mcpServers: [] });
         sessionId = values.load;
         log("LOADED", loaded);
       } else {
         const created = await ctx.request("session/new", { cwd: values.cwd!, mcpServers: [] });
         sessionId = created.sessionId;
-        log("NEW", { sessionId: created.sessionId, mode: created.modes?.currentModeId, modes: created.modes?.availableModes.map((m) => m.id) });
+        log("NEW", {
+          sessionId: created.sessionId,
+          modes: created.modes?.availableModes.map((m) => m.id),
+          config: summarize(created.configOptions),
+        });
       }
       if (values["set-mode"]) {
         const started = Date.now();
         await ctx.request("session/set_mode", { sessionId, modeId: values["set-mode"] });
         log("SET_MODE", { modeId: values["set-mode"], ms: Date.now() - started });
+      }
+      for (const entry of values.config ?? []) {
+        const [configId, value] = entry.split("=") as [string, string];
+        const started = Date.now();
+        const result = await ctx.request("session/set_config_option", { sessionId, configId, value });
+        log("SET_CONFIG", { configId, value, ms: Date.now() - started, config: summarize(result.configOptions) });
       }
       for (const text of prompts) {
         log("PROMPT", text);
@@ -107,11 +140,20 @@ await acp
             void ctx.notify("session/cancel", { sessionId });
           }, Number(values["cancel-after"]));
         }
-        const response = await ctx.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+        const prompt: acp.ContentBlock[] = [{ type: "text", text }];
+        if (values.image) {
+          prompt.push({ type: "image", mimeType: "image/png", data: readFileSync(values.image).toString("base64") });
+        }
+        const response = await ctx.request("session/prompt", { sessionId, prompt });
         log("RESPONSE", { ...response, ms: Date.now() - started });
       }
       const listed = await ctx.request("session/list", { cwd: values.cwd! });
-      log("LIST", listed.sessions.map((session) => session.sessionId));
+      log(
+        "LIST",
+        values.list
+          ? listed.sessions.slice(0, 5).map((session) => ({ id: session.sessionId.slice(0, 8), title: session.title, updatedAt: session.updatedAt }))
+          : listed.sessions.length,
+      );
       if (values.close) await ctx.request("session/close", { sessionId });
     },
   );

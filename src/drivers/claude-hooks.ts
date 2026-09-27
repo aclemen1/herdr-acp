@@ -2,10 +2,16 @@ import type { ElicitationSchema, PermissionOption } from "@agentclientprotocol/s
 import { randomUUID } from "node:crypto";
 import { elicitationContent } from "../elicitation.ts";
 import { modeAllowsTool } from "./claude-modes.ts";
-import { toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
+import { toolContent, toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
 import type { HookHandler, HookHost } from "./types.ts";
 
 const INTERACTIVE_HOOK_TIMEOUT_S = 3600;
+const PLAN_EXIT_OPTIONS: PermissionOption[] = [
+  { optionId: "auto", name: "Yes, and use auto mode", kind: "allow_always" },
+  { optionId: "bypassPermissions", name: "Yes, and bypass permissions", kind: "allow_always" },
+  { optionId: "acceptEdits", name: "Yes, and auto-accept edits", kind: "allow_always" },
+  { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+];
 const PLAN_APPROVED_PROMPT = "The user approved your plan. Implement it now.";
 
 export function claudeHookSettings(command: string) {
@@ -27,6 +33,10 @@ type HookInput = {
   tool_use_id?: string;
   permission_suggestions?: unknown[] | null;
   permission_mode?: string;
+  effort?: { level?: string };
+  context_window?: { total_input_tokens?: number; total_output_tokens?: number; context_window_size?: number };
+  model?: { id?: string; display_name?: string };
+  rate_limits?: Record<string, unknown>;
   message_id?: string;
   index?: number;
   delta?: string;
@@ -46,7 +56,11 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
   return async (raw) => {
     const input = raw as HookInput;
     if (input.permission_mode) await host.reportMode(input.permission_mode);
+    if (input.hook_event_name !== "StatusLine" && input.effort?.level) await host.reportStatus({ effort: input.effort.level });
     switch (input.hook_event_name) {
+      case "StatusLine":
+        await host.reportStatus(statusFromInput(input));
+        return null;
       case "MessageDisplay": {
         if (typeof input.delta !== "string" || !input.delta) return null;
         const messageId = input.message_id ?? "";
@@ -63,6 +77,7 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
           announced.set(toolKey(name, input.tool_input), id);
           host.announceToolCall(id);
           const locations = toolLocations(input.tool_input);
+          const content = toolContent(name, input.tool_input);
           await host.notify({
             sessionUpdate: "tool_call",
             toolCallId: id,
@@ -71,6 +86,7 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
             status: "pending",
             rawInput: input.tool_input,
             ...(locations ? { locations } : {}),
+            ...(content ? { content } : {}),
           });
         }
         if (name === "AskUserQuestion") return answerQuestions(host, input.tool_input ?? {}, id);
@@ -82,6 +98,20 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
       default:
         return null;
     }
+  };
+}
+
+export function statusFromInput(input: HookInput) {
+  const window = input.context_window;
+  return {
+    ...(window?.context_window_size ? { contextSize: window.context_window_size } : {}),
+    ...(window?.total_input_tokens !== undefined
+      ? { contextUsed: window.total_input_tokens + (window.total_output_tokens ?? 0) }
+      : {}),
+    ...(input.model?.id ? { modelId: input.model.id } : {}),
+    ...(input.model?.display_name ? { modelLabel: input.model.display_name } : {}),
+    ...(input.effort?.level ? { effort: input.effort.level } : {}),
+    ...(input.rate_limits ? { rateLimits: input.rate_limits } : {}),
   };
 }
 
@@ -143,8 +173,7 @@ async function decideExitPlan(host: HookHost, input: HookInput, toolCallId: stri
       ...(plan ? { content: [{ type: "content", content: { type: "text", text: plan } }] } : {}),
     },
     [
-      { optionId: "acceptEdits", name: "Yes, and auto-accept edits", kind: "allow_always" },
-      { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+      ...PLAN_EXIT_OPTIONS.filter((option) => host.availableModeIds().includes(option.optionId)),
       { optionId: "plan", name: "No, keep planning", kind: "reject_once" },
     ],
   );
@@ -155,7 +184,7 @@ async function decideExitPlan(host: HookHost, input: HookInput, toolCallId: stri
       ...(reason ? { permissionDecisionReason: reason } : {}),
     },
   });
-  if (choice === "acceptEdits" || choice === "default") {
+  if (choice && choice !== "plan") {
     host.takePendingMode();
     host.continueWithMode(choice, PLAN_APPROVED_PROMPT);
     if (toolCallId) {

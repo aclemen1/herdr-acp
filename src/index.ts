@@ -8,6 +8,7 @@ import { ClaudeDriver } from "./drivers/claude.ts";
 import type { Driver } from "./drivers/types.ts";
 import { Herdr } from "./herdr.ts";
 import { defaultStateDir, hookCommand } from "./hook-bridge.ts";
+import { paneEnv, parseList } from "./pane-env.ts";
 
 const USAGE = `Usage: herdr-acp [options] [-- <agent args>...]
        herdr-acp install-hooks [--agent <kind>]
@@ -22,13 +23,17 @@ Options:
   --workspace <label>     herdr workspace that hosts session tabs (default: acp)
   --herdr-session <name>  Named herdr session (default: the default session)
   --machine <label>       Saved herdr SSH machine
-  --forward-env <list>    Comma-separated variable names forwarded to panes; NAME* matches a prefix
+  --forward-env <list>    Variable names forwarded even when protected (e.g. ANTHROPIC_API_KEY)
+  --exclude-env <list>    Extra variables kept out of panes; NAME* matches a prefix
   --start-timeout <ms>    Agent startup timeout (default: 60000)
   --trust-folders         Accept the agent's folder trust dialog when the ACP client cannot be asked
   -h, --help              Show this help
 
 Environment fallbacks: HERDR_ACP_AGENT, HERDR_ACP_WORKSPACE, HERDR_ACP_HERDR_SESSION,
-HERDR_ACP_MACHINE, HERDR_ACP_FORWARD_ENV, HERDR_ACP_TRUST_FOLDERS=1.`;
+HERDR_ACP_MACHINE, HERDR_ACP_FORWARD_ENV, HERDR_ACP_EXCLUDE_ENV, HERDR_ACP_TRUST_FOLDERS=1.
+
+Panes receive the environment herdr-acp was started with, minus terminal variables (PATH, TERM,
+SHELL, HERDR_*, …) and the agent's protected variables (API keys, internal markers).`;
 
 const DRIVERS: Record<string, () => Driver> = {
   claude: () => new ClaudeDriver(),
@@ -45,6 +50,7 @@ const { values, positionals } = parseArgs({
     "herdr-session": { type: "string" },
     machine: { type: "string" },
     "forward-env": { type: "string" },
+    "exclude-env": { type: "string" },
     "start-timeout": { type: "string" },
     "trust-folders": { type: "boolean" },
     help: { type: "boolean", short: "h" },
@@ -74,15 +80,20 @@ if (command) {
   process.exit(0);
 }
 
+const driver = makeDriver();
 const { app, disposeAll } = createAgent(
   {
     herdr: new Herdr({
       session: values["herdr-session"] ?? env.HERDR_ACP_HERDR_SESSION,
       machine: values.machine ?? env.HERDR_ACP_MACHINE,
     }),
-    driver: makeDriver(),
+    driver,
     workspaceLabel: values.workspace ?? env.HERDR_ACP_WORKSPACE ?? "acp",
-    paneEnv: selectEnv(values["forward-env"] ?? env.HERDR_ACP_FORWARD_ENV ?? ""),
+    paneEnv: paneEnv(env, {
+      protectedEnv: driver.protectedEnv,
+      include: parseList(values["forward-env"] ?? env.HERDR_ACP_FORWARD_ENV),
+      exclude: ["HERDR_ACP_*", ...parseList(values["exclude-env"] ?? env.HERDR_ACP_EXCLUDE_ENV)],
+    }),
     extraArgs: positionals,
     stateDir: defaultStateDir(env),
     startTimeoutMs: Number(values["start-timeout"] ?? 60_000),
@@ -104,18 +115,6 @@ const shutdown = async () => {
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => void shutdown());
 await connection.closed;
 await shutdown();
-
-function selectEnv(spec: string): Record<string, string> {
-  const patterns = spec.split(",").map((item) => item.trim()).filter(Boolean);
-  const selected: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    if (patterns.some((pattern) => (pattern.endsWith("*") ? key.startsWith(pattern.slice(0, -1)) : key === pattern))) {
-      selected[key] = value;
-    }
-  }
-  return selected;
-}
 
 function readVersion(): string {
   try {

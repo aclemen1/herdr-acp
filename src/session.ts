@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type {
   AgentContext,
@@ -8,6 +9,7 @@ import type {
   McpServer,
   PermissionOption,
   PromptResponse,
+  SessionConfigOption,
   SessionMode,
   SessionModeState,
   SessionUpdate,
@@ -15,10 +17,11 @@ import type {
   ToolCallUpdate,
 } from "@agentclientprotocol/sdk";
 import { CLIENT_METHODS, RequestError } from "@agentclientprotocol/sdk";
+import { selectValues } from "./config-options.ts";
 import { elicitationContent } from "./elicitation.ts";
-import type { Driver, HookHost, TokenUsage, TranscriptParser } from "./drivers/types.ts";
+import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, TranscriptParser } from "./drivers/types.ts";
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
-import { hookCommand, HookServer, socketPath } from "./hook-bridge.ts";
+import { hookCommand, HookServer, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
 import { promptToText } from "./prompt.ts";
 
@@ -40,6 +43,9 @@ export type RequestContext = { client: AgentContext; requestId: string | number 
 
 type Placement = { paneId: string; tabId: string | null };
 type Turn = { cancelled: boolean; streamed: string; continuation: { modeId: string; prompt: string } | null };
+type LaunchChange = { mode?: string; model?: string; effort?: string };
+
+const STATUS_WAIT_MS = 3_000;
 
 let placementQueue: Promise<unknown> = Promise.resolve();
 
@@ -60,11 +66,21 @@ export class Session implements HookHost {
   private hookServer: HookServer | null = null;
   private turn: Turn | null = null;
   private readonly modes: SessionMode[];
-  private mode: string;
+  private readonly settings: SessionSettings;
+  private readonly overrides: { model?: string; effort?: string } = {};
   private pendingMode: string | null = null;
+  private pendingConfig: { model?: string; effort?: string } = {};
   private restarting: Promise<void> = Promise.resolve();
   private readonly mcpServers: McpServer[];
   private readonly canRestart: boolean;
+  private modelLabel: string | null = null;
+  private lastModelId: string | null = null;
+  private context: { used: number; size: number } | null = null;
+  private rateLimits: Record<string, unknown> | null = null;
+  private statusSeen: () => void = () => undefined;
+  private readonly firstStatus = new Promise<void>((resolve) => {
+    this.statusSeen = resolve;
+  });
 
   private constructor(
     config: SessionConfig,
@@ -72,7 +88,7 @@ export class Session implements HookHost {
     id: string,
     cwd: string,
     placement: Placement,
-    init: { mode: string; mcpServers: McpServer[]; canRestart: boolean },
+    init: { settings: SessionSettings; mcpServers: McpServer[]; canRestart: boolean },
   ) {
     this.config = config;
     this.client = client;
@@ -82,13 +98,17 @@ export class Session implements HookHost {
     this.ownedTabId = placement.tabId;
     this.parser = config.driver.createParser();
     this.modes = config.driver.availableModes(config.extraArgs);
-    this.mode = init.mode;
+    this.settings = { ...init.settings };
     this.mcpServers = init.mcpServers;
     this.canRestart = init.canRestart;
   }
 
   get modeState(): SessionModeState {
-    return { currentModeId: this.mode, availableModes: this.modes };
+    return { currentModeId: this.settings.mode, availableModes: this.modes };
+  }
+
+  get configOptions(): SessionConfigOption[] {
+    return this.config.driver.configOptions(this.settings, this.modes, this.modelLabel);
   }
 
   get pane(): string {
@@ -103,14 +123,15 @@ export class Session implements HookHost {
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
     const placement = await placePane(config, id, params.cwd);
-    const mode = await config.driver.initialMode(config.extraArgs);
+    const settings = await config.driver.initialSettings(config.extraArgs);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
-      mode,
+      settings,
       mcpServers: params.mcpServers,
       canRestart: true,
     });
     await session.listenHooks();
     await session.start({ resume: false, trusted });
+    await session.waitForStatus();
     return session;
   }
 
@@ -119,7 +140,7 @@ export class Session implements HookHost {
     params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
     ctx: RequestContext,
   ): Promise<Session | null> {
-    const mode = await config.driver.initialMode(config.extraArgs);
+    const settings = await config.driver.initialSettings(config.extraArgs);
     const live = await findLiveAgent(config, params.sessionId);
     if (live) {
       const workspace = (await config.herdr.listWorkspaces()).find((ws) => ws.workspace_id === live.workspace_id);
@@ -129,7 +150,7 @@ export class Session implements HookHost {
         params.sessionId,
         live.cwd ?? params.cwd,
         { paneId: live.pane_id, tabId: null },
-        { mode, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel },
+        { settings, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel },
       );
       await session.listenHooks();
       return session;
@@ -138,12 +159,13 @@ export class Session implements HookHost {
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const placement = await placePane(config, params.sessionId, params.cwd);
     const session = new Session(config, ctx.client, params.sessionId, params.cwd, placement, {
-      mode,
+      settings,
       mcpServers: params.mcpServers,
       canRestart: true,
     });
     await session.listenHooks();
     await session.start({ resume: true, trusted });
+    await session.waitForStatus();
     return session;
   }
 
@@ -164,7 +186,7 @@ export class Session implements HookHost {
 
   async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
     if (this.turn) throw new Error(`Session ${this.sessionId} already has a prompt in progress`);
-    const text = promptToText(blocks);
+    const text = await promptToText(blocks, { attachmentDir: join(this.config.stateDir, "attachments") });
     await this.restarting;
     const turn: Turn = { cancelled: false, streamed: "", continuation: null };
     this.turn = turn;
@@ -172,8 +194,13 @@ export class Session implements HookHost {
       return await this.runTurn(text, turn);
     } finally {
       this.turn = null;
-      const pending = this.takePendingMode();
-      if (pending) this.restarting = this.restartWithMode(pending).catch((error) => this.reportRestartFailure(error));
+      const change: LaunchChange = { ...this.pendingConfig };
+      const pendingMode = this.takePendingMode();
+      if (pendingMode) change.mode = pendingMode;
+      this.pendingConfig = {};
+      if (Object.keys(change).length > 0) {
+        this.restarting = this.restartWith(change).catch((error) => this.reportRestartFailure(error));
+      }
     }
   }
 
@@ -181,27 +208,87 @@ export class Session implements HookHost {
     if (!this.modes.some((mode) => mode.id === modeId)) {
       throw RequestError.invalidParams({ modeId }, `unknown mode: ${modeId}`);
     }
-    if (!this.canRestart) {
-      throw RequestError.invalidParams(
-        { modeId },
-        `the mode of a session started outside herdr-acp can only be changed in its herdr pane (${this.paneId})`,
-      );
-    }
+    this.assertRestartable("mode");
     if (this.turn) {
-      this.pendingMode = modeId === this.mode ? null : modeId;
+      this.pendingMode = modeId === this.settings.mode ? null : modeId;
       return;
     }
     await this.restarting;
-    if (modeId === this.mode) return;
-    this.restarting = this.restartWithMode(modeId);
+    if (modeId === this.settings.mode) return;
+    this.restarting = this.restartWith({ mode: modeId });
     await this.restarting;
+  }
+
+  async setConfigOption(configId: string, value: string): Promise<SessionConfigOption[]> {
+    if (configId === "mode") {
+      await this.setMode(value);
+      return this.configOptions;
+    }
+    if ((configId !== "model" && configId !== "effort") || !selectValues(this.configOptions, configId).includes(value)) {
+      throw RequestError.invalidParams({ configId, value }, `unsupported value for ${configId}: ${value}`);
+    }
+    this.assertRestartable(configId);
+    if ((this.settings[configId] ?? "default") === value) return this.configOptions;
+    if (this.turn) {
+      this.pendingConfig[configId] = value;
+      return this.configOptions;
+    }
+    await this.restarting;
+    this.restarting = this.restartWith({ [configId]: value });
+    await this.restarting;
+    return this.configOptions;
+  }
+
+  availableModeIds(): string[] {
+    return this.modes.map((mode) => mode.id);
+  }
+
+  async reportStatus(status: StatusReport): Promise<void> {
+    let configChanged = false;
+    if (status.modelId) {
+      if (this.lastModelId && status.modelId !== this.lastModelId && this.settings.model !== status.modelId) {
+        this.settings.model = status.modelId;
+      }
+      this.lastModelId = status.modelId;
+    }
+    if (status.modelLabel && status.modelLabel !== this.modelLabel) {
+      this.modelLabel = status.modelLabel;
+      configChanged = true;
+    }
+    if (status.effort && status.effort !== this.settings.effort) {
+      this.settings.effort = status.effort;
+      configChanged = true;
+    }
+    if (status.rateLimits) this.rateLimits = status.rateLimits;
+    if (configChanged) await this.notify({ sessionUpdate: "config_option_update", configOptions: this.configOptions });
+    if (status.contextSize !== undefined && status.contextUsed !== undefined) {
+      const next = { used: status.contextUsed, size: status.contextSize };
+      if (next.used !== this.context?.used || next.size !== this.context?.size) {
+        this.context = next;
+        await this.notify({ sessionUpdate: "usage_update", used: next.used, size: next.size });
+      }
+    }
+    this.statusSeen();
+  }
+
+  private async waitForStatus(): Promise<void> {
+    await Promise.race([this.firstStatus, sleep(STATUS_WAIT_MS)]);
+  }
+
+  private assertRestartable(what: string): void {
+    if (this.canRestart) return;
+    throw RequestError.invalidParams(
+      { what },
+      `the ${what} of a session started outside herdr-acp can only be changed in its herdr pane (${this.paneId})`,
+    );
   }
 
   async reportMode(modeId: string): Promise<void> {
     if (this.pendingMode === modeId) this.pendingMode = null;
-    if (modeId === this.mode || !this.modes.some((mode) => mode.id === modeId)) return;
-    this.mode = modeId;
+    if (modeId === this.settings.mode || !this.modes.some((mode) => mode.id === modeId)) return;
+    this.settings.mode = modeId;
     await this.notify({ sessionUpdate: "current_mode_update", currentModeId: modeId });
+    await this.notify({ sessionUpdate: "config_option_update", configOptions: this.configOptions });
   }
 
   continueWithMode(modeId: string, prompt: string): void {
@@ -218,7 +305,7 @@ export class Session implements HookHost {
     this.pendingMode ??= modeId;
   }
 
-  private async restartWithMode(modeId: string): Promise<void> {
+  private async restartWith(change: LaunchChange): Promise<void> {
     const { herdr, driver } = this.config;
     await herdr.prompt(this.paneId, driver.exitCommand);
     const deadline = Date.now() + 15_000;
@@ -228,13 +315,20 @@ export class Session implements HookHost {
       if (Date.now() > deadline) throw new Error(`${driver.title} did not exit in herdr pane ${this.paneId}`);
       await sleep(this.config.pollMs);
     }
+    if (change.model) this.overrides.model = change.model;
+    if (change.effort) this.overrides.effort = change.effort;
     const resume = await driver.transcriptExists(this.sessionId);
-    await this.start({ resume, trusted: true, mode: modeId });
-    await this.reportMode(modeId);
+    await this.start({ resume, trusted: true, mode: change.mode ?? this.settings.mode });
+    if (change.model) this.settings.model = change.model;
+    if (change.effort) this.settings.effort = change.effort;
+    if (change.mode) await this.reportMode(change.mode);
+    if (change.model || change.effort) {
+      await this.notify({ sessionUpdate: "config_option_update", configOptions: this.configOptions });
+    }
   }
 
   private reportRestartFailure(error: unknown): void {
-    process.stderr.write(`herdr-acp: mode change failed for session ${this.sessionId}: ${String(error)}\n`);
+    process.stderr.write(`herdr-acp: settings change failed for session ${this.sessionId}: ${String(error)}\n`);
   }
 
   async cancel(): Promise<void> {
@@ -302,7 +396,7 @@ export class Session implements HookHost {
   private async listenHooks(): Promise<void> {
     const handle = this.config.driver.createHookHandler(this);
     this.hookServer = await HookServer.listen(socketPath(this.config.stateDir, this.sessionId), (input) =>
-      this.turn ? handle(input) : Promise.resolve(null),
+      this.turn || isStatusLine(input) ? handle(input) : Promise.resolve(null),
     );
   }
 
@@ -316,7 +410,10 @@ export class Session implements HookHost {
       stateDir: this.config.stateDir,
       extraArgs: this.config.extraArgs,
       hookCommand: hookCommand(),
+      statusLineCommand: statusLineCommand(),
+      clientCanElicit: Boolean(this.config.client.capabilities?.elicitation?.form),
       ...(opts.mode ? { mode: opts.mode } : {}),
+      ...this.overrides,
     });
     const deadline = Date.now() + this.config.startTimeoutMs;
     let name = `acp-${this.sessionId.slice(0, 8).toLowerCase()}`;
@@ -381,11 +478,15 @@ export class Session implements HookHost {
       const continuation = turn.continuation;
       turn.continuation = null;
       if (continuation && !turn.cancelled) {
-        await this.restartWithMode(continuation.modeId);
+        await this.restartWith({ mode: continuation.modeId });
         next = continuation.prompt;
       }
     }
-    return { stopReason: turn.cancelled ? "cancelled" : outcome.stopReason, ...usageResponse(usage) };
+    return {
+      stopReason: turn.cancelled ? "cancelled" : outcome.stopReason,
+      ...usageResponse(usage),
+      ...(this.rateLimits ? { _meta: { herdr: { rateLimits: this.rateLimits } } } : {}),
+    };
   }
 
   private async followPrompt(
@@ -446,6 +547,10 @@ export class Session implements HookHost {
   }
 }
 
+function isStatusLine(input: unknown): boolean {
+  return (input as { hook_event_name?: string } | null)?.hook_event_name === "StatusLine";
+}
+
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, "");
 }
@@ -484,17 +589,34 @@ async function ensureTrust(config: SessionConfig, cwd: string, ctx: RequestConte
   );
 }
 
-export async function listLiveSessions(config: SessionConfig, cwd?: string | null) {
-  const agents = await config.herdr.listAgents();
-  return agents
-    .filter((agent) => agent.agent === config.driver.kind && agent.agent_session?.kind === "id")
-    .filter((agent) => !cwd || agent.cwd === cwd)
-    .map((agent) => ({
+export async function listSessions(config: SessionConfig, cwd?: string | null) {
+  const agents = (await config.herdr.listAgents()).filter(
+    (agent) => agent.agent === config.driver.kind && agent.agent_session?.kind === "id",
+  );
+  const live = new Map(agents.map((agent) => [agent.agent_session!.value, agent]));
+  const stored = cwd ? await config.driver.listTranscripts(cwd) : [];
+  const sessions = stored.map((entry) => {
+    const agent = live.get(entry.sessionId);
+    live.delete(entry.sessionId);
+    return {
+      sessionId: entry.sessionId,
+      cwd: agent?.cwd ?? cwd ?? "",
+      title: entry.title ?? agent?.terminal_title_stripped ?? null,
+      updatedAt: entry.updatedAt,
+      ...(agent ? { _meta: { herdr: { paneId: agent.pane_id, status: agent.agent_status } } } : {}),
+    };
+  });
+  for (const agent of live.values()) {
+    if (cwd && agent.cwd !== cwd) continue;
+    sessions.unshift({
       sessionId: agent.agent_session!.value,
       cwd: agent.cwd ?? "",
       title: agent.terminal_title_stripped ?? null,
+      updatedAt: new Date().toISOString(),
       _meta: { herdr: { paneId: agent.pane_id, status: agent.agent_status } },
-    }));
+    });
+  }
+  return sessions;
 }
 
 async function findLiveAgent(config: SessionConfig, sessionId: string): Promise<AgentInfo | null> {
@@ -517,15 +639,16 @@ function placePane(config: SessionConfig, sessionId: string, cwd: string): Promi
   });
 }
 
-function usageResponse(usage: Map<string, TokenUsage>): Pick<PromptResponse, "usage"> {
+export function usageResponse(usage: Map<string, TokenUsage>): Pick<PromptResponse, "usage"> {
   if (usage.size === 0) return {};
   const total = { inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 0 };
   for (const item of usage.values()) {
-    total.inputTokens += item.inputTokens + item.cachedReadTokens + item.cachedWriteTokens;
+    total.inputTokens += item.inputTokens;
     total.outputTokens += item.outputTokens;
     total.cachedReadTokens += item.cachedReadTokens;
     total.cachedWriteTokens += item.cachedWriteTokens;
     total.thoughtTokens += item.thoughtTokens;
   }
-  return { usage: { ...total, totalTokens: total.inputTokens + total.outputTokens } };
+  const totalTokens = total.inputTokens + total.outputTokens + total.cachedReadTokens + total.cachedWriteTokens;
+  return { usage: { ...total, totalTokens } };
 }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CreateElicitationResponse, SessionUpdate } from "@agentclientprotocol/sdk";
 import { answersFromContent, createClaudeHookHandler, type Question, questionsSchema } from "./claude-hooks.ts";
-import type { HookHost } from "./types.ts";
+import type { HookHost, StatusReport } from "./types.ts";
 
 type FakeHost = HookHost & {
   updates: SessionUpdate[];
@@ -13,6 +13,7 @@ type FakeHost = HookHost & {
   modes: string[];
   pending: string | null;
   continuation: { modeId: string; prompt: string } | null;
+  statuses: StatusReport[];
 };
 
 function fakeHost(
@@ -29,8 +30,13 @@ function fakeHost(
     modes: [],
     pending: opts.pending ?? null,
     continuation: null,
+    statuses: [],
     continueWithMode: (modeId, prompt) => {
       host.continuation = { modeId, prompt };
+    },
+    availableModeIds: () => ["default", "acceptEdits", "plan", "auto"],
+    reportStatus: async (status) => {
+      host.statuses.push(status);
     },
     reportMode: async (mode) => {
       host.modes.push(mode);
@@ -212,7 +218,7 @@ test("turns a plan approval into a restart in the chosen mode", async () => {
     tool_use_id: "tp1",
     tool_input: { plan: "1. Do it" },
   })) as { continue: boolean; hookSpecificOutput: { permissionDecision: string } };
-  assert.deepEqual(host.permissions, [{ title: "Ready to code?", options: ["acceptEdits", "default", "plan"] }]);
+  assert.deepEqual(host.permissions, [{ title: "Ready to code?", options: ["auto", "acceptEdits", "default", "plan"] }]);
   assert.equal(output.continue, false);
   assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
   assert.deepEqual(host.continuation, { modeId: "acceptEdits", prompt: "The user approved your plan. Implement it now." });
@@ -229,4 +235,37 @@ test("keeps planning when the user rejects the plan", async () => {
   })) as { hookSpecificOutput: { permissionDecision: string } };
   assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
   assert.equal(host.continuation, null);
+});
+
+test("reports context, model, effort and quotas from the status line", async () => {
+  const host = fakeHost();
+  await createClaudeHookHandler(host)({
+    hook_event_name: "StatusLine",
+    context_window: { total_input_tokens: 1000, total_output_tokens: 50, context_window_size: 200000 },
+    model: { id: "claude-x", display_name: "X" },
+    effort: { level: "high" },
+    rate_limits: { five_hour: { used_percentage: 12 } },
+  });
+  assert.deepEqual(host.statuses, [
+    {
+      contextSize: 200000,
+      contextUsed: 1050,
+      modelId: "claude-x",
+      modelLabel: "X",
+      effort: "high",
+      rateLimits: { five_hour: { used_percentage: 12 } },
+    },
+  ]);
+});
+
+test("announces edits with a diff", async () => {
+  const host = fakeHost();
+  await createClaudeHookHandler(host)({
+    hook_event_name: "PreToolUse",
+    tool_name: "Edit",
+    tool_use_id: "te1",
+    tool_input: { file_path: "/a.ts", old_string: "x", new_string: "y" },
+  });
+  const update = host.updates[0] as { content?: unknown };
+  assert.deepEqual(update.content, [{ type: "diff", path: "/a.ts", oldText: "x", newText: "y" }]);
 });

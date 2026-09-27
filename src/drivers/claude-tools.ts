@@ -1,4 +1,4 @@
-import type { ToolKind } from "@agentclientprotocol/sdk";
+import type { ToolCallContent, ToolKind } from "@agentclientprotocol/sdk";
 
 export function toolKind(name: string): ToolKind {
   switch (name) {
@@ -65,4 +65,28 @@ export function toolLocations(input: unknown): { path: string }[] | undefined {
   const args = (input ?? {}) as Record<string, unknown>;
   const path = typeof args.file_path === "string" ? args.file_path : typeof args.notebook_path === "string" ? args.notebook_path : undefined;
   return path ? [{ path }] : undefined;
+}
+
+export function toolContent(name: string, input: unknown): ToolCallContent[] | undefined {
+  const args = (input ?? {}) as Record<string, unknown>;
+  const path = typeof args.file_path === "string" ? args.file_path : undefined;
+  if (!path) return undefined;
+  const str = (value: unknown) => (typeof value === "string" ? value : "");
+  switch (name) {
+    case "Write":
+      return [{ type: "diff", path, oldText: null, newText: str(args.content) }];
+    case "Edit":
+      return [{ type: "diff", path, oldText: str(args.old_string), newText: str(args.new_string) }];
+    case "MultiEdit":
+      return Array.isArray(args.edits)
+        ? (args.edits as Record<string, unknown>[]).map((edit) => ({
+            type: "diff" as const,
+            path,
+            oldText: str(edit.old_string),
+            newText: str(edit.new_string),
+          }))
+        : undefined;
+    default:
+      return undefined;
+  }
 }

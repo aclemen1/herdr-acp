@@ -3,7 +3,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claudeInitialMode, claudeModes, modeAllowsTool, withoutPermissionModeArg } from "./claude-modes.ts";
+import { withoutArg } from "./claude-config.ts";
+import { claudeInitialMode, claudeModes, modeAllowsTool } from "./claude-modes.ts";
 
 test("offers bypass only when Claude was allowed to skip permissions", () => {
   assert.equal(claudeModes([]).some((mode) => mode.id === "bypassPermissions"), false);
@@ -19,7 +20,7 @@ test("reads the initial mode from arguments, then from user settings", async () 
 });
 
 test("replaces a permission mode argument", () => {
-  assert.deepEqual(withoutPermissionModeArg(["--model", "opus", "--permission-mode", "plan", "--permission-mode=default"]), [
+  assert.deepEqual(withoutArg(["--model", "opus", "--permission-mode", "plan", "--permission-mode=default"], "--permission-mode"), [
     "--model",
     "opus",
   ]);
