@@ -124,3 +124,7 @@ npm run smoke -- --cwd /some/project --herdr-session test "Say hello"
 ```
 
 The smoke script is an ACP client that drives herdr-acp end to end. It is best run against an isolated herdr server (`herdr --session test server`), started from a shell where no `CLAUDE_CODE_*` variables are set.
+
+## License
+
+[Apache License 2.0](LICENSE). Copyright 2026 Alain Clément.
