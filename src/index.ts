@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import { createAgent } from "./agent.ts";
 import { ClaudeDriver } from "./drivers/claude.ts";
+import { PiDriver } from "./drivers/pi.ts";
 import type { Driver } from "./drivers/types.ts";
 import { Herdr } from "./herdr.ts";
 import { defaultStateDir, hookCommand } from "./hook-bridge.ts";
@@ -19,7 +20,7 @@ install-hooks adds the herdr-acp hooks to the agent's user settings, so that ses
 outside herdr-acp can be driven over ACP too. The hooks do nothing while no herdr-acp is attached.
 
 Options:
-  --agent <kind>          Agent kind (default: claude)
+  --agent <kind>          Agent kind: claude or pi (default: claude)
   --workspace <label>     herdr workspace that hosts session tabs (default: acp)
   --herdr-session <name>  Named herdr session (default: the default session)
   --machine <label>       Saved herdr SSH machine
@@ -37,6 +38,7 @@ SHELL, HERDR_*, …) and the agent's protected variables (API keys, internal mar
 
 const DRIVERS: Record<string, () => Driver> = {
   claude: () => new ClaudeDriver(),
+  pi: () => new PiDriver(),
 };
 
 const command = process.argv[2] === "install-hooks" || process.argv[2] === "uninstall-hooks" ? process.argv[2] : null;

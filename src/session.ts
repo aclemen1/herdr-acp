@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type {
   AgentContext,
@@ -21,7 +22,7 @@ import { selectValues } from "./config-options.ts";
 import { elicitationContent } from "./elicitation.ts";
 import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, TranscriptParser } from "./drivers/types.ts";
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
-import { hookCommand, HookServer, socketPath, statusLineCommand } from "./hook-bridge.ts";
+import { envFilePath, hookCommand, HookServer, renderEnvFile, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
 import { promptToText } from "./prompt.ts";
 
@@ -42,10 +43,22 @@ export type SessionConfig = {
 export type RequestContext = { client: AgentContext; requestId: string | number | null };
 
 type Placement = { paneId: string; tabId: string | null };
-type Turn = { cancelled: boolean; streamed: string; continuation: { modeId: string; prompt: string } | null };
+type Turn = {
+  cancelled: boolean;
+  streamed: string;
+  continuation: { modeId: string; prompt: string } | null;
+  queueDepth: number;
+  steersInFlight: string[];
+  streamedThoughts: string;
+  ended: boolean;
+};
+
+export type SteerOutcome = { outcome: "injected" | "startedNewTurn" | "promptRequired"; reason?: string };
 type LaunchChange = { mode?: string; model?: string; effort?: string };
 
 const STATUS_WAIT_MS = 3_000;
+const ENV_WAIT_MS = 3_000;
+const ALWAYS_HANDLED_HOOKS = new Set(["StatusLine", "SessionStart", "FileChanged", "CwdChanged"]);
 
 let placementQueue: Promise<unknown> = Promise.resolve();
 
@@ -71,6 +84,8 @@ export class Session implements HookHost {
   private pendingMode: string | null = null;
   private pendingConfig: { model?: string; effort?: string } = {};
   private restarting: Promise<void> = Promise.resolve();
+  private promptChain: Promise<unknown> = Promise.resolve();
+  private cancelGeneration = 0;
   private readonly mcpServers: McpServer[];
   private readonly canRestart: boolean;
   private modelLabel: string | null = null;
@@ -78,6 +93,8 @@ export class Session implements HookHost {
   private context: { used: number; size: number } | null = null;
   private rateLimits: Record<string, unknown> | null = null;
   private statusSeen: () => void = () => undefined;
+  private envSeen: () => void = () => undefined;
+  private envSeenPromise: Promise<void> = Promise.resolve();
   private readonly firstStatus = new Promise<void>((resolve) => {
     this.statusSeen = resolve;
   });
@@ -130,6 +147,7 @@ export class Session implements HookHost {
       canRestart: true,
     });
     await session.listenHooks();
+    await session.writeEnvFile();
     try {
       await session.start({ resume: false, trusted });
     } catch (error) {
@@ -156,6 +174,7 @@ export class Session implements HookHost {
       canRestart: true,
     });
     await session.listenHooks();
+    await session.writeEnvFile();
     try {
       await session.start({ resume: false, trusted, forkFrom: params.sessionId });
     } catch (error) {
@@ -184,6 +203,7 @@ export class Session implements HookHost {
         { settings, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel },
       );
       await session.listenHooks();
+      if ((await session.writeEnvFile()) && config.driver.envAcknowledged) await session.waitForEnv();
       return session;
     }
     if (!(await config.driver.transcriptExists(params.sessionId))) return null;
@@ -195,6 +215,7 @@ export class Session implements HookHost {
       canRestart: true,
     });
     await session.listenHooks();
+    await session.writeEnvFile();
     try {
       await session.start({ resume: true, trusted });
     } catch (error) {
@@ -221,7 +242,7 @@ export class Session implements HookHost {
       ref: agent.agent_session ?? null,
     });
     const parser = this.config.driver.createParser();
-    for (const record of await new JsonlTail(path).readNew()) {
+    for (const record of this.config.driver.replayOrder(await new JsonlTail(path).readNew())) {
       for (const event of parser.parse(record, { replay: true })) {
         if (event.type === "update") await onUpdate(event.update);
       }
@@ -233,10 +254,45 @@ export class Session implements HookHost {
   }
 
   async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
-    if (this.turn) throw new Error(`Session ${this.sessionId} already has a prompt in progress`);
-    const text = await promptToText(blocks, { attachmentDir: join(this.config.stateDir, "attachments") });
+    const generation = this.cancelGeneration;
+    const run = this.promptChain.then(() =>
+      generation === this.cancelGeneration ? this.runPrompt(blocks) : { stopReason: "cancelled" as const },
+    );
+    this.promptChain = run.catch(() => undefined);
+    return run;
+  }
+
+  async steer(blocks: ContentBlock[], idleBehavior?: string): Promise<SteerOutcome> {
+    const turn = this.turn;
+    if (!turn) {
+      if (idleBehavior === "promptRequired") return { outcome: "promptRequired", reason: "noRunningTurn" };
+      this.prompt(blocks).catch((error) => {
+        process.stderr.write(`herdr-acp: steered prompt failed for session ${this.sessionId}: ${String(error)}\n`);
+      });
+      return { outcome: "startedNewTurn" };
+    }
+    const text = await this.promptText(blocks);
+    turn.steersInFlight.push(normalizeText(text));
+    await this.config.herdr.prompt(this.paneId, text);
+    return { outcome: "injected" };
+  }
+
+  private promptText(blocks: ContentBlock[]): Promise<string> {
+    return promptToText(blocks, { attachmentDir: join(this.config.stateDir, "attachments") });
+  }
+
+  private async runPrompt(blocks: ContentBlock[]): Promise<PromptResponse> {
+    const text = await this.promptText(blocks);
     await this.restarting;
-    const turn: Turn = { cancelled: false, streamed: "", continuation: null };
+    const turn: Turn = {
+      cancelled: false,
+      streamed: "",
+      streamedThoughts: "",
+      continuation: null,
+      queueDepth: 0,
+      steersInFlight: [],
+      ended: false,
+    };
     this.turn = turn;
     try {
       return await this.runTurn(text, turn);
@@ -255,6 +311,10 @@ export class Session implements HookHost {
   async setMode(modeId: string): Promise<void> {
     if (!this.modes.some((mode) => mode.id === modeId)) {
       throw RequestError.invalidParams({ modeId }, `unknown mode: ${modeId}`);
+    }
+    if (!this.config.driver.modeRequiresRestart) {
+      await this.reportMode(modeId);
+      return;
     }
     this.assertRestartable("mode");
     if (this.turn) {
@@ -380,6 +440,7 @@ export class Session implements HookHost {
   }
 
   async cancel(): Promise<void> {
+    this.cancelGeneration++;
     if (!this.turn) return;
     this.turn.cancelled = true;
     await this.config.herdr.sendKeys(this.paneId, ["esc"]).catch(() => undefined);
@@ -408,9 +469,23 @@ export class Session implements HookHost {
     this.parser.markSettled(toolCallId);
   }
 
-  async streamText(text: string): Promise<void> {
-    if (this.turn) this.turn.streamed += normalizeText(text);
-    await this.notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+  async streamText(text: string, kind: "message" | "thought" = "message"): Promise<void> {
+    if (this.turn) {
+      if (kind === "message") this.turn.streamed += normalizeText(text);
+      else this.turn.streamedThoughts += normalizeText(text);
+    }
+    await this.notify({
+      sessionUpdate: kind === "message" ? "agent_message_chunk" : "agent_thought_chunk",
+      content: { type: "text", text },
+    });
+  }
+
+  currentMode(): string {
+    return this.settings.mode;
+  }
+
+  endTurn(): void {
+    if (this.turn) this.turn.ended = true;
   }
 
   async requestPermission(toolCall: ToolCallUpdate, options: PermissionOption[]): Promise<string | null> {
@@ -437,6 +512,27 @@ export class Session implements HookHost {
     });
   }
 
+  envApplied(): void {
+    this.envSeen();
+  }
+
+  async writeEnvFile(): Promise<boolean> {
+    const path = envFilePath(this.config.stateDir, this.sessionId);
+    const content = renderEnvFile(this.config.paneEnv);
+    const previous = await readFile(path, "utf8").catch(() => null);
+    if (previous === content) return false;
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    this.envSeenPromise = new Promise((resolve) => {
+      this.envSeen = resolve;
+    });
+    await writeFile(path, content, { mode: 0o600 });
+    return previous !== null;
+  }
+
+  private async waitForEnv(): Promise<void> {
+    await Promise.race([this.envSeenPromise, sleep(ENV_WAIT_MS)]);
+  }
+
   markCancelled(): void {
     if (this.turn) this.turn.cancelled = true;
   }
@@ -444,7 +540,7 @@ export class Session implements HookHost {
   private async listenHooks(): Promise<void> {
     const handle = this.config.driver.createHookHandler(this);
     this.hookServer = await HookServer.listen(socketPath(this.config.stateDir, this.sessionId), (input) =>
-      this.turn || isStatusLine(input) ? handle(input) : Promise.resolve(null),
+      this.turn || isAlwaysHandled(input) ? handle(input) : Promise.resolve(null),
     );
   }
 
@@ -460,6 +556,7 @@ export class Session implements HookHost {
       hookCommand: hookCommand(),
       statusLineCommand: statusLineCommand(),
       clientCanElicit: Boolean(this.config.client.capabilities?.elicitation?.form),
+      trustApproved: !opts.trusted,
       ...(opts.mode ? { mode: opts.mode } : {}),
       ...(opts.forkFrom ? { forkFrom: opts.forkFrom } : {}),
       ...this.overrides,
@@ -506,7 +603,7 @@ export class Session implements HookHost {
         return;
       }
       if (agent.agent_status === "blocked") {
-        if (trustedBeforeLaunch || trustAnswered) {
+        if (trustedBeforeLaunch || trustAnswered || driver.acceptTrustKeys.length === 0) {
           throw new Error(`${driver.title} is blocked during startup in herdr pane ${this.paneId}`);
         }
         await herdr.sendKeys(this.paneId, driver.acceptTrustKeys);
@@ -569,9 +666,10 @@ export class Session implements HookHost {
           } else if (event.type === "usage") usage.set(event.messageId, event.usage);
           else if (event.type === "stop_reason") outcome.stopReason = event.stopReason;
           else if (event.type === "turn_end") turnEnded = true;
+          else if (event.type === "queue") trackQueue(turn, event.change, event.content);
         }
       }
-      if (turnEnded) return;
+      if ((turnEnded || turn.ended) && !hasQueuedMessages(turn)) return;
 
       const status = (await herdr.getAgent(this.paneId)).agent_status;
       if (status === "working") {
@@ -588,7 +686,7 @@ export class Session implements HookHost {
       } else if (status === "idle" || status === "done") {
         if (sawActivity || turn.cancelled || Date.now() - startedAt > 10_000) {
           quietSince ??= Date.now();
-          if (Date.now() - quietSince >= idleSettleMs) return;
+          if (Date.now() - quietSince >= idleSettleMs && !hasQueuedMessages(turn)) return;
         }
       }
       await sleep(pollMs);
@@ -596,8 +694,25 @@ export class Session implements HookHost {
   }
 }
 
-function isStatusLine(input: unknown): boolean {
-  return (input as { hook_event_name?: string } | null)?.hook_event_name === "StatusLine";
+function trackQueue(turn: Turn, change: "enqueue" | "dequeue" | "clear", content?: string): void {
+  if (change === "clear") {
+    turn.queueDepth = 0;
+    turn.steersInFlight = [];
+  } else if (change === "enqueue") {
+    turn.queueDepth++;
+    const index = content === undefined ? -1 : turn.steersInFlight.indexOf(normalizeText(content));
+    if (index >= 0) turn.steersInFlight.splice(index, 1);
+  } else {
+    turn.queueDepth = Math.max(0, turn.queueDepth - 1);
+  }
+}
+
+function hasQueuedMessages(turn: Turn): boolean {
+  return !turn.cancelled && (turn.queueDepth > 0 || turn.steersInFlight.length > 0);
+}
+
+function isAlwaysHandled(input: unknown): boolean {
+  return ALWAYS_HANDLED_HOOKS.has((input as { hook_event_name?: string } | null)?.hook_event_name ?? "");
 }
 
 function normalizeText(text: string): string {
@@ -605,13 +720,15 @@ function normalizeText(text: string): string {
 }
 
 function isAlreadyStreamed(turn: Turn, update: SessionUpdate): boolean {
-  if (update.sessionUpdate !== "agent_message_chunk" || update.content.type !== "text") return false;
+  if (update.sessionUpdate !== "agent_message_chunk" && update.sessionUpdate !== "agent_thought_chunk") return false;
+  if (update.content.type !== "text") return false;
+  const key = update.sessionUpdate === "agent_message_chunk" ? "streamed" : "streamedThoughts";
   const text = normalizeText(update.content.text);
-  if (text && turn.streamed.startsWith(text)) {
-    turn.streamed = turn.streamed.slice(text.length);
+  if (text && turn[key].startsWith(text)) {
+    turn[key] = turn[key].slice(text.length);
     return true;
   }
-  turn.streamed = "";
+  turn[key] = "";
   return false;
 }
 
@@ -639,10 +756,11 @@ async function ensureTrust(config: SessionConfig, cwd: string, ctx: RequestConte
 }
 
 export async function listSessions(config: SessionConfig, cwd?: string | null) {
-  const agents = (await config.herdr.listAgents()).filter(
-    (agent) => agent.agent === config.driver.kind && agent.agent_session?.kind === "id",
-  );
-  const live = new Map(agents.map((agent) => [agent.agent_session!.value, agent]));
+  const live = new Map<string, AgentInfo>();
+  for (const agent of await config.herdr.listAgents()) {
+    const id = liveSessionId(config, agent);
+    if (id) live.set(id, agent);
+  }
   const stored = cwd ? await config.driver.listTranscripts(cwd) : [];
   const sessions = stored.map((entry) => {
     const agent = live.get(entry.sessionId);
@@ -655,10 +773,10 @@ export async function listSessions(config: SessionConfig, cwd?: string | null) {
       ...(agent ? { _meta: { herdr: { paneId: agent.pane_id, status: agent.agent_status } } } : {}),
     };
   });
-  for (const agent of live.values()) {
+  for (const [sessionId, agent] of live) {
     if (cwd && agent.cwd !== cwd) continue;
     sessions.unshift({
-      sessionId: agent.agent_session!.value,
+      sessionId,
       cwd: agent.cwd ?? "",
       title: agent.terminal_title_stripped ?? null,
       updatedAt: new Date().toISOString(),
@@ -670,13 +788,22 @@ export async function listSessions(config: SessionConfig, cwd?: string | null) {
 
 async function findLiveAgent(config: SessionConfig, sessionId: string): Promise<AgentInfo | null> {
   const agents = await config.herdr.listAgents();
-  return agents.find((agent) => agent.agent === config.driver.kind && agent.agent_session?.value === sessionId) ?? null;
+  return agents.find((agent) => liveSessionId(config, agent) === sessionId) ?? null;
+}
+
+function liveSessionId(config: SessionConfig, agent: AgentInfo): string | null {
+  if (agent.agent !== config.driver.kind || !agent.agent_session) return null;
+  return config.driver.sessionIdFromRef(agent.agent_session);
 }
 
 function placePane(config: SessionConfig, sessionId: string, cwd: string): Promise<Placement> {
   return serialized(async () => {
     const { herdr, workspaceLabel } = config;
-    const env = { ...config.paneEnv, HERDR_ACP_SOCKET: socketPath(config.stateDir, sessionId) };
+    const env = {
+      ...config.paneEnv,
+      HERDR_ACP_SOCKET: socketPath(config.stateDir, sessionId),
+      HERDR_ACP_ENV_FILE: envFilePath(config.stateDir, sessionId),
+    };
     const label = `${config.driver.kind} ${sessionId.slice(0, 8)}`;
     const workspace = (await herdr.listWorkspaces()).find((ws) => ws.label === workspaceLabel);
     if (!workspace) {

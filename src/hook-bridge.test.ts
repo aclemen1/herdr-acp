@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { HookServer, socketPath } from "./hook-bridge.ts";
+import { HookServer, renderEnvFile, socketPath } from "./hook-bridge.ts";
 
 const hookScript = fileURLToPath(new URL("./hook.ts", import.meta.url));
 
@@ -41,4 +41,43 @@ test("prints nothing when no session server is listening", async () => {
   const result = await runHook(join(tmpdir(), "herdr-acp-missing.sock"), { hook_event_name: "PreToolUse" });
   assert.equal(result.code, 0);
   assert.equal(result.stdout, "");
+});
+
+test("renders shell exports with safe quoting", () => {
+  assert.equal(renderEnvFile({ A: "x", B: "it's", "BAD-NAME": "no" }), "export A='x'\nexport B='it'\\''s'\n");
+});
+
+test("copies the session env into Claude's env file on SessionStart", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hacp-env-"));
+  const envFile = join(dir, "session.sh");
+  const claudeEnvFile = join(dir, "claude-env.sh");
+  await writeFile(envFile, "export PAPERCLIP_RUN_ID='r2'\n");
+  const result = await new Promise<{ stdout: string; code: number | null }>((resolve) => {
+    const proc = spawn(process.execPath, [hookScript], {
+      env: { ...process.env, HERDR_ACP_SOCKET: join(dir, "missing.sock"), HERDR_ACP_ENV_FILE: envFile, CLAUDE_ENV_FILE: claudeEnvFile },
+    });
+    let stdout = "";
+    proc.stdout.on("data", (chunk) => (stdout += chunk));
+    proc.on("close", (code) => resolve({ stdout, code }));
+    proc.stdin.end(JSON.stringify({ hook_event_name: "SessionStart", session_id: "s" }));
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { hookSpecificOutput: { hookEventName: "SessionStart", watchPaths: [envFile] } });
+  assert.equal(await readFile(claudeEnvFile, "utf8"), "export PAPERCLIP_RUN_ID='r2'\n");
+});
+
+test("keeps watching the session env after a directory change", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hacp-env-"));
+  const envFile = join(dir, "session.sh");
+  await writeFile(envFile, "export A='1'\n");
+  const stdout = await new Promise<string>((resolve) => {
+    const proc = spawn(process.execPath, [hookScript], {
+      env: { ...process.env, HERDR_ACP_SOCKET: join(dir, "missing.sock"), HERDR_ACP_ENV_FILE: envFile, CLAUDE_ENV_FILE: join(dir, "c.sh") },
+    });
+    let out = "";
+    proc.stdout.on("data", (chunk) => (out += chunk));
+    proc.on("close", () => resolve(out));
+    proc.stdin.end(JSON.stringify({ hook_event_name: "CwdChanged", session_id: "s" }));
+  });
+  assert.deepEqual(JSON.parse(stdout), { hookSpecificOutput: { hookEventName: "CwdChanged", watchPaths: [envFile] } });
 });

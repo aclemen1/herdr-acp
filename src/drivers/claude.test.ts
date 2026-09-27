@@ -152,3 +152,13 @@ test("ignores records written before the current turn", () => {
   assert.deepEqual(parser.parse(old, { replay: false, since: Date.parse("2026-06-01T00:00:00Z") }), []);
   assert.equal(parser.parse(old, { replay: false })[0]?.type, "turn_end");
 });
+
+test("reports operations on the TUI message queue", () => {
+  const parser = new ClaudeTranscriptParser();
+  const op = (operation: string, content?: string) =>
+    parser.parse({ type: "queue-operation", operation, ...(content ? { content } : {}) }, { replay: false });
+  assert.deepEqual(op("enqueue", "more"), [{ type: "queue", change: "enqueue", content: "more" }]);
+  assert.deepEqual(op("dequeue"), [{ type: "queue", change: "dequeue" }]);
+  assert.deepEqual(op("remove", "more"), [{ type: "queue", change: "dequeue" }]);
+  assert.deepEqual(op("popAll", "more"), [{ type: "queue", change: "clear" }]);
+});

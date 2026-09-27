@@ -1,6 +1,27 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
-import { listSessions, Session, type RequestContext, type SessionConfig } from "./session.ts";
+import { listSessions, Session, type RequestContext, type SessionConfig, type SteerOutcome } from "./session.ts";
+
+type SteerParams = {
+  sessionId: string;
+  prompt: acp.ContentBlock[];
+  _meta?: { steering?: { idleBehavior?: string } };
+};
+
+function parseSteerParams(raw: unknown): SteerParams {
+  const params = (raw ?? {}) as Partial<SteerParams>;
+  if (typeof params.sessionId !== "string" || !params.sessionId) {
+    throw RequestError.invalidParams(undefined, "steer params require a non-empty sessionId");
+  }
+  if (!Array.isArray(params.prompt) || params.prompt.length === 0) {
+    throw RequestError.invalidParams(undefined, "steer params require a non-empty prompt array");
+  }
+  const idleBehavior = params._meta?.steering?.idleBehavior;
+  if (idleBehavior !== undefined && idleBehavior !== "promptRequired") {
+    throw RequestError.invalidParams(undefined, "unsupported steering idleBehavior");
+  }
+  return params as SteerParams;
+}
 
 export function createAgent(config: SessionConfig, version: string) {
   const sessions = new Map<string, Session>();
@@ -37,12 +58,14 @@ export function createAgent(config: SessionConfig, version: string) {
         protocolVersion: acp.PROTOCOL_VERSION,
         agentInfo: { name: "herdr-acp", title: `${config.driver.title} via herdr`, version },
         agentCapabilities: {
+          _meta: { claudeCode: { promptQueueing: true } },
           loadSession: true,
           promptCapabilities: { image: true, audio: false, embeddedContext: true },
           mcpCapabilities: { http: true, sse: true },
           sessionCapabilities: { list: {}, close: {}, resume: {}, fork: {} },
         },
         authMethods: [],
+        _meta: { steering: { supported: true } },
       };
     })
     .onRequest("authenticate", () => ({}))
@@ -78,6 +101,9 @@ export function createAgent(config: SessionConfig, version: string) {
       }
       return { configOptions: await getSession(params.sessionId).setConfigOption(params.configId, params.value) };
     })
+    .onRequest<SteerParams, SteerOutcome>("_session/steering", parseSteerParams, async ({ params }) =>
+      getSession(params.sessionId).steer(params.prompt, params._meta?.steering?.idleBehavior),
+    )
     .onRequest("session/list", async ({ params }) => ({ sessions: await listSessions(config, params.cwd) }))
     .onRequest("session/prompt", async ({ params }) => getSession(params.sessionId).prompt(params.prompt))
     .onNotification("session/cancel", async ({ params }) => {

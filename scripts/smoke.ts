@@ -18,9 +18,13 @@ const { values, positionals } = parseArgs({
     "no-forms": { type: "boolean", default: false },
     "trust-folders": { type: "boolean", default: false },
     "set-mode": { type: "string" },
+    agent: { type: "string" },
     config: { type: "string", multiple: true },
     resume: { type: "string" },
     fork: { type: "string" },
+    queue: { type: "string" },
+    steer: { type: "string" },
+    "steer-after": { type: "string", default: "3000" },
     image: { type: "string" },
     list: { type: "boolean", default: false },
   },
@@ -31,6 +35,7 @@ const prompts = positionals.length > 0 ? positionals : ["Exécute la commande pw
 const args = ["src/index.ts", "--workspace", values.workspace!];
 if (values["herdr-session"]) args.push("--herdr-session", values["herdr-session"]);
 if (values["trust-folders"]) args.push("--trust-folders");
+if (values.agent) args.push("--agent", values.agent);
 if (values.ask) args.push("--", "--settings", JSON.stringify({ permissions: { ask: [values.ask] } }));
 const child = spawn(process.execPath, args, { stdio: ["pipe", "pipe", "inherit"] });
 
@@ -148,6 +153,22 @@ await acp
             void ctx.notify("session/cancel", { sessionId });
           }, Number(values["cancel-after"]));
         }
+        if (values.steer) {
+          setTimeout(() => {
+            void ctx
+              .request("_session/steering", { sessionId, prompt: [{ type: "text", text: values.steer! }] })
+              .then((outcome) => log("STEER", outcome));
+          }, Number(values["steer-after"]));
+        }
+        if (values.queue) {
+          setTimeout(() => {
+            const queuedStart = Date.now();
+            log("QUEUE", values.queue);
+            void ctx
+              .request("session/prompt", { sessionId, prompt: [{ type: "text", text: values.queue! }] })
+              .then((response) => log("QUEUED_RESPONSE", { stopReason: response.stopReason, ms: Date.now() - queuedStart }));
+          }, 500);
+        }
         const prompt: acp.ContentBlock[] = [{ type: "text", text }];
         if (values.image) {
           prompt.push({ type: "image", mimeType: "image/png", data: readFileSync(values.image).toString("base64") });
@@ -155,6 +176,7 @@ await acp
         const response = await ctx.request("session/prompt", { sessionId, prompt });
         log("RESPONSE", { ...response, ms: Date.now() - started });
       }
+      if (values.queue) await ctx.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Réponds juste FIN." }] });
       const listed = await ctx.request("session/list", { cwd: values.cwd! });
       log(
         "LIST",

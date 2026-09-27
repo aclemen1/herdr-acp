@@ -19,6 +19,17 @@ export function socketPath(stateDir: string, sessionId: string): string {
   return join(tmpdir(), `herdr-acp-${process.getuid?.() ?? "u"}`, `${sessionId}.sock`);
 }
 
+export function envFilePath(stateDir: string, sessionId: string): string {
+  return join(stateDir, "env", `${sessionId}.sh`);
+}
+
+export function renderEnvFile(env: Record<string, string>): string {
+  return Object.entries(env)
+    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+    .map(([key, value]) => `export ${key}='${value.replaceAll("'", "'\\''")}'\n`)
+    .join("");
+}
+
 export function hookCommand(options: { global?: boolean } = {}): string {
   const script = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./hook.ts" : "./hook.js", import.meta.url));
   const node = options.global ? (nodeOnPath() ?? process.execPath) : process.execPath;

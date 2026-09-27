@@ -23,7 +23,8 @@ export type DriverEvent =
   | { type: "update"; update: SessionUpdate }
   | { type: "usage"; messageId: string; usage: TokenUsage }
   | { type: "stop_reason"; stopReason: StopReason }
-  | { type: "turn_end" };
+  | { type: "turn_end" }
+  | { type: "queue"; change: "enqueue" | "dequeue" | "clear"; content?: string };
 
 export interface TranscriptParser {
   parse(record: unknown, options: { replay: boolean; since?: number }): DriverEvent[];
@@ -52,6 +53,7 @@ export type LaunchInput = {
   hookCommand: string;
   statusLineCommand: string;
   clientCanElicit: boolean;
+  trustApproved: boolean;
   mode?: string;
   model?: string;
   effort?: string;
@@ -63,7 +65,9 @@ export interface HookHost {
   notify(update: SessionUpdate): Promise<void>;
   announceToolCall(toolCallId: string): void;
   settleToolCall(toolCallId: string): void;
-  streamText(text: string): Promise<void>;
+  streamText(text: string, kind?: "message" | "thought"): Promise<void>;
+  currentMode(): string;
+  endTurn(): void;
   requestPermission(toolCall: ToolCallUpdate, options: PermissionOption[]): Promise<string | null>;
   availableModeIds(): string[];
   reportMode(modeId: string): Promise<void>;
@@ -73,6 +77,7 @@ export interface HookHost {
   continueWithMode(modeId: string, prompt: string): void;
   elicit(request: { message: string; schema: ElicitationSchema; toolCallId?: string }): Promise<CreateElicitationResponse | null>;
   markCancelled(): void;
+  envApplied(): void;
 }
 
 export type HookHandler = (input: unknown) => Promise<unknown | null>;
@@ -81,6 +86,7 @@ export interface Driver {
   readonly kind: string;
   readonly title: string;
   newSessionId(): string;
+  sessionIdFromRef(ref: AgentSessionRef): string | null;
   launchArgs(input: LaunchInput): Promise<string[]>;
   transcriptPath(input: { sessionId: string; cwd: string; ref: AgentSessionRef | null }): Promise<string>;
   transcriptExists(sessionId: string): Promise<boolean>;
@@ -96,4 +102,7 @@ export interface Driver {
   configOptions(settings: SessionSettings, modes: SessionMode[], modelLabel: string | null): SessionConfigOption[];
   readonly protectedEnv: RegExp;
   readonly exitCommand: string;
+  readonly modeRequiresRestart: boolean;
+  readonly envAcknowledged: boolean;
+  replayOrder(records: unknown[]): unknown[];
 }

@@ -8,10 +8,12 @@
     "herdr-acp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test 'src/**/*.test.ts'",
     "smoke": "node scripts/smoke.ts"
@@ -23,7 +25,8 @@
     "acp",
     "agent-client-protocol",
     "herdr",
-    "claude-code"
+    "claude-code",
+    "pi"
   ],
   "author": "Alain Clément",
   "license": "UNLICENSED",

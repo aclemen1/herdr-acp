@@ -22,6 +22,9 @@ export function claudeHookSettings(command: string) {
       PermissionRequest: [{ matcher: "*", hooks: handler(INTERACTIVE_HOOK_TIMEOUT_S) }],
       MessageDisplay: [{ hooks: handler() }],
       UserPromptSubmit: [{ hooks: handler() }],
+      SessionStart: [{ hooks: handler() }],
+      FileChanged: [{ hooks: handler() }],
+      CwdChanged: [{ hooks: handler() }],
     },
   };
 }
@@ -60,6 +63,11 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
     switch (input.hook_event_name) {
       case "StatusLine":
         await host.reportStatus(statusFromInput(input));
+        return null;
+      case "SessionStart":
+      case "CwdChanged":
+      case "FileChanged":
+        host.envApplied();
         return null;
       case "MessageDisplay": {
         if (typeof input.delta !== "string" || !input.delta) return null;

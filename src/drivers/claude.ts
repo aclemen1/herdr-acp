@@ -28,6 +28,10 @@ export class ClaudeDriver implements Driver {
     return randomUUID();
   }
 
+  sessionIdFromRef(ref: { kind: string; value: string }): string | null {
+    return ref.kind === "id" ? ref.value : null;
+  }
+
   async launchArgs(input: LaunchInput): Promise<string[]> {
     const args = input.forkFrom
       ? ["--resume", input.forkFrom, "--fork-session", "--session-id", input.sessionId]
@@ -65,6 +69,12 @@ export class ClaudeDriver implements Driver {
   }
 
   readonly exitCommand = "/exit";
+  readonly modeRequiresRestart = true;
+  readonly envAcknowledged = true;
+
+  replayOrder(records: unknown[]): unknown[] {
+    return records;
+  }
   readonly protectedEnv = /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDECODE|CLAUDE_CODE_\w*|CLAUDE_PID|CLAUDE_EFFORT)$/;
 
   availableModes(extraArgs: string[]) {
@@ -239,6 +249,8 @@ type Rec = {
   isSidechain?: boolean;
   isMeta?: boolean;
   timestamp?: string;
+  operation?: string;
+  content?: unknown;
   attachment?: { type?: string; content?: unknown; isInitial?: boolean };
   message?: {
     id?: string;
@@ -271,6 +283,7 @@ export class ClaudeTranscriptParser implements TranscriptParser {
     if (record.type === "system" && record.subtype === "turn_duration") return [{ type: "turn_end" }];
     if (record.type === "assistant") return this.parseAssistant(record);
     if (record.type === "attachment") return this.parseAttachment(record.attachment);
+    if (record.type === "queue-operation") return queueEvent(record);
     if (record.type === "user") return this.parseUser(record, options.replay);
     return [];
   }
@@ -362,6 +375,21 @@ export class ClaudeTranscriptParser implements TranscriptParser {
       }
     }
     return events;
+  }
+}
+
+function queueEvent(record: Rec): DriverEvent[] {
+  const content = typeof record.content === "string" ? record.content : undefined;
+  switch (record.operation) {
+    case "enqueue":
+      return [{ type: "queue", change: "enqueue", ...(content !== undefined ? { content } : {}) }];
+    case "dequeue":
+    case "remove":
+      return [{ type: "queue", change: "dequeue" }];
+    case "popAll":
+      return [{ type: "queue", change: "clear" }];
+    default:
+      return [];
   }
 }
 
