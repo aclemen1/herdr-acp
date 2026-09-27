@@ -116,7 +116,7 @@ export function createAgent(config: SessionConfig, version: string) {
     });
 
   const disposeAll = async () => {
-    await Promise.all([...sessions.values()].map((session) => session.dispose()));
+    await Promise.all([...sessions.values()].map((session) => session.shutdown()));
     sessions.clear();
   };
 

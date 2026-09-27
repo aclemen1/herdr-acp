@@ -24,6 +24,7 @@ import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, Trans
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
 import { envFilePath, hookCommand, HookServer, renderEnvFile, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
+import { releasePane, stopAgent } from "./pane-release.ts";
 import { promptToText } from "./prompt.ts";
 
 export type SessionConfig = {
@@ -37,6 +38,7 @@ export type SessionConfig = {
   pollMs: number;
   idleSettleMs: number;
   trustFolders: boolean;
+  keepPanes: boolean;
   client: { capabilities: ClientCapabilities | null };
 };
 
@@ -58,6 +60,7 @@ type LaunchChange = { mode?: string; model?: string; effort?: string };
 
 const STATUS_WAIT_MS = 3_000;
 const ENV_WAIT_MS = 3_000;
+const EXIT_WAIT_MS = 5_000;
 const ALWAYS_HANDLED_HOOKS = new Set(["StatusLine", "SessionStart", "FileChanged", "CwdChanged"]);
 
 let placementQueue: Promise<unknown> = Promise.resolve();
@@ -415,13 +418,8 @@ export class Session implements HookHost {
 
   private async restartWith(change: LaunchChange): Promise<void> {
     const { herdr, driver } = this.config;
-    await herdr.prompt(this.paneId, driver.exitCommand);
-    const deadline = Date.now() + 15_000;
-    for (;;) {
-      const agent = await herdr.getAgent(this.paneId).catch(() => null);
-      if (!agent || agent.agent !== driver.kind) break;
-      if (Date.now() > deadline) throw new Error(`${driver.title} did not exit in herdr pane ${this.paneId}`);
-      await sleep(this.config.pollMs);
+    if (!(await stopAgent(herdr, driver, this.paneId, { pollMs: this.config.pollMs, timeoutMs: 15_000 }))) {
+      throw new Error(`${driver.title} did not exit in herdr pane ${this.paneId}`);
     }
     if (change.model) this.overrides.model = change.model;
     if (change.effort) this.overrides.effort = change.effort;
@@ -449,7 +447,19 @@ export class Session implements HookHost {
   async close(): Promise<void> {
     await this.cancel();
     await this.dispose();
-    if (this.ownedTabId) await this.config.herdr.closeTab(this.ownedTabId).catch(() => undefined);
+    await this.releaseOwnedTab();
+  }
+
+  // Process exit: a tab herdr-acp created goes away with it; a pane attached by session/load stays untouched.
+  async shutdown(): Promise<void> {
+    if (!this.ownedTabId || this.config.keepPanes) return this.dispose();
+    await this.close();
+  }
+
+  private async releaseOwnedTab(): Promise<void> {
+    if (!this.ownedTabId || this.config.keepPanes) return;
+    const { herdr, driver, pollMs } = this.config;
+    await releasePane(herdr, driver, { paneId: this.paneId, tabId: this.ownedTabId }, { pollMs, timeoutMs: EXIT_WAIT_MS });
   }
 
   async dispose(): Promise<void> {

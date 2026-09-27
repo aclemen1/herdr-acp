@@ -28,6 +28,7 @@ Options:
   --exclude-env <list>    Extra variables kept out of panes; NAME* matches a prefix
   --start-timeout <ms>    Agent startup timeout (default: 60000)
   --trust-folders         Accept the agent's folder trust dialog when the ACP client cannot be asked
+  --keep-panes            Leave session tabs open when a session closes or herdr-acp exits
   -h, --help              Show this help
 
 Environment fallbacks: HERDR_ACP_AGENT, HERDR_ACP_WORKSPACE, HERDR_ACP_HERDR_SESSION,
@@ -55,6 +56,7 @@ const { values, positionals } = parseArgs({
     "exclude-env": { type: "string" },
     "start-timeout": { type: "string" },
     "trust-folders": { type: "boolean" },
+    "keep-panes": { type: "boolean" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -102,6 +104,7 @@ const { app, disposeAll } = createAgent(
     pollMs: 300,
     idleSettleMs: 2_500,
     trustFolders: values["trust-folders"] ?? env.HERDR_ACP_TRUST_FOLDERS === "1",
+    keepPanes: values["keep-panes"] ?? env.HERDR_ACP_KEEP_PANES === "1",
     client: { capabilities: null },
   },
   readVersion(),
@@ -110,10 +113,12 @@ const { app, disposeAll } = createAgent(
 const connection = app.connect(
   ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>),
 );
-const shutdown = async () => {
-  await disposeAll();
-  process.exit(0);
-};
+let stopping: Promise<never> | null = null;
+const shutdown = () =>
+  (stopping ??= (async () => {
+    await disposeAll();
+    process.exit(0);
+  })());
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => void shutdown());
 await connection.closed;
 await shutdown();

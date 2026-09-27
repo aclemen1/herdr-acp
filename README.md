@@ -46,6 +46,8 @@ exec herdr-acp --trust-folders "$@"
 
 `--trust-folders` is needed there because Paperclip runs agents in fresh worktrees and cannot answer the folder trust question.
 
+Paperclip starts a new herdr-acp for every run and resumes the conversation with `session/load`. When a run ends (`session/close`, end of stdin, or SIGTERM), herdr-acp exits the agent and closes the tab it created, so tabs do not pile up in the `acp` workspace; the next run resumes the transcript in a new tab. Add `--keep-panes` to the wrapper to keep them open.
+
 ## Options
 
 | Option | Environment | Meaning |
@@ -55,6 +57,7 @@ exec herdr-acp --trust-folders "$@"
 | `--herdr-session <name>` | `HERDR_ACP_HERDR_SESSION` | Named herdr session |
 | `--machine <label>` | `HERDR_ACP_MACHINE` | Saved herdr SSH machine |
 | `--trust-folders` | `HERDR_ACP_TRUST_FOLDERS=1` | Accept the folder trust question when the client cannot be asked |
+| `--keep-panes` | `HERDR_ACP_KEEP_PANES=1` | Leave session tabs open on `session/close` and on exit (debugging) |
 | `--forward-env <list>` | `HERDR_ACP_FORWARD_ENV` | Variables forwarded even when protected (e.g. `ANTHROPIC_API_KEY`) |
 | `--exclude-env <list>` | `HERDR_ACP_EXCLUDE_ENV` | Extra variables kept out of panes (`NAME*` matches a prefix) |
 | `--start-timeout <ms>` | | Agent startup timeout (default 60000) |
@@ -84,6 +87,7 @@ A session can also be loaded while it is running in a herdr pane you started you
 ## How it works
 
 - **Placement**: each session gets a tab in the herdr workspace `acp`, created with the session's cwd and environment. The agent is started with `herdr agent start`.
+- **Teardown**: on `session/close` or when herdr-acp exits (end of stdin, SIGINT, SIGTERM, SIGHUP), the agent is asked to exit (`/exit`, `/quit` for Pi; up to 5 s) and the tab herdr-acp created is closed. A pane you started yourself and attached with `session/load` is never closed.
 - **Prompts** are typed into the TUI with `herdr agent prompt`, exactly as you would.
 - **Transcript**: herdr-acp tails the agent's JSONL session file and turns messages, tool calls and results into `session/update` notifications.
 - **Structured callbacks**: Claude Code hooks (`PreToolUse`, `PermissionRequest`, `MessageDisplay`, `UserPromptSubmit`, `SessionStart`, `CwdChanged`, `FileChanged`) and a Pi extension call back into herdr-acp over a per-session unix socket (`~/.local/state/herdr-acp/s/`). This is how permissions, questions, streaming, modes and turn ends are handled without reading the screen.
