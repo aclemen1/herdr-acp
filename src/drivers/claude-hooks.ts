@@ -2,6 +2,7 @@ import type { ElicitationSchema, PermissionOption } from "@agentclientprotocol/s
 import { randomUUID } from "node:crypto";
 import { elicitationContent } from "../elicitation.ts";
 import { modeAllowsTool } from "./claude-modes.ts";
+import { settingsFilePath } from "./claude-settings.ts";
 import { toolContent, toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
 import type { HookHandler, HookHost } from "./types.ts";
 
@@ -123,6 +124,31 @@ export function statusFromInput(input: HookInput) {
   };
 }
 
+export type PermissionSuggestion = Record<string, unknown> & {
+  type?: string;
+  destination?: string;
+  originalDestination?: string;
+  path: string | null;
+};
+
+export async function prepareSuggestions(suggestions: unknown[], cwd: string): Promise<PermissionSuggestion[]> {
+  return Promise.all(
+    suggestions.map(async (raw) => {
+      const suggestion = { ...(raw as Record<string, unknown>) };
+      if (suggestion.destination === "userSettings") {
+        suggestion.originalDestination = "userSettings";
+        suggestion.destination = "localSettings";
+      }
+      return { ...suggestion, path: await settingsFilePath(String(suggestion.destination ?? ""), cwd) };
+    }),
+  );
+}
+
+function toPermissionUpdate(suggestion: PermissionSuggestion): Record<string, unknown> {
+  const { path: _path, originalDestination: _original, ...update } = suggestion;
+  return update;
+}
+
 export function alwaysAllowLabel(suggestions: unknown[]): string {
   const rules = suggestions.flatMap((suggestion) => {
     const item = suggestion as { rules?: { toolName?: string; ruleContent?: string }[]; directories?: string[] };
@@ -160,15 +186,27 @@ async function decidePermission(host: HookHost, input: HookInput, toolCallId: st
     await host.reportMode(pending);
     return permissionOutput({ behavior: "allow", updatedPermissions: [setMode(pending)] });
   }
-  const suggestions = Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [];
+  const suggestions = await prepareSuggestions(
+    Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [],
+    host.cwd,
+  );
   const options: PermissionOption[] = [
     { optionId: "allow", name: "Allow", kind: "allow_once" },
-    ...(suggestions.length > 0 ? [{ optionId: "allow_always", name: alwaysAllowLabel(suggestions), kind: "allow_always" as const }] : []),
+    ...(suggestions.length > 0
+      ? [
+          {
+            optionId: "allow_always",
+            name: alwaysAllowLabel(suggestions),
+            kind: "allow_always" as const,
+            _meta: { herdr: { suggestions } },
+          },
+        ]
+      : []),
     { optionId: "reject", name: "Reject", kind: "reject_once" },
   ];
   const choice = await host.requestPermission(toolCall, options);
   if (choice === "allow" || choice === "allow_always") {
-    const updates = [...(choice === "allow_always" ? suggestions : []), ...(pending ? [setMode(pending)] : [])];
+    const updates = [...(choice === "allow_always" ? suggestions.map(toPermissionUpdate) : []), ...(pending ? [setMode(pending)] : [])];
     if (pending) await host.reportMode(pending);
     return permissionOutput({ behavior: "allow", ...(updates.length > 0 ? { updatedPermissions: updates } : {}) });
   }

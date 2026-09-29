@@ -24,6 +24,7 @@ import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, Trans
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
 import { envFilePath, hookCommand, HookServer, renderEnvFile, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
+import { deletePaneRecord, listPaneRecords, readPaneRecord, writePaneRecord } from "./pane-records.ts";
 import { releasePane, stopAgent } from "./pane-release.ts";
 import { promptToText } from "./prompt.ts";
 
@@ -44,7 +45,7 @@ export type SessionConfig = {
 
 export type RequestContext = { client: AgentContext; requestId: string | number | null };
 
-type Placement = { paneId: string; tabId: string | null };
+type Placement = { paneId: string; tabId: string | null; observedTabId?: string };
 type Turn = {
   cancelled: boolean;
   streamed: string;
@@ -76,6 +77,7 @@ export class Session implements HookHost {
   readonly cwd: string;
   private paneId: string;
   private readonly ownedTabId: string | null;
+  private readonly observedTabId: string | null;
   private readonly config: SessionConfig;
   private readonly client: AgentContext;
   private readonly parser: TranscriptParser;
@@ -116,6 +118,7 @@ export class Session implements HookHost {
     this.cwd = cwd;
     this.paneId = placement.paneId;
     this.ownedTabId = placement.tabId;
+    this.observedTabId = placement.observedTabId ?? null;
     this.parser = config.driver.createParser();
     this.modes = config.driver.availableModes(config.extraArgs);
     this.settings = { ...init.settings };
@@ -129,6 +132,14 @@ export class Session implements HookHost {
 
   get configOptions(): SessionConfigOption[] {
     return this.config.driver.configOptions(this.settings, this.modes, this.modelLabel);
+  }
+
+  get tab(): string | null {
+    return this.ownedTabId ?? this.observedTabId;
+  }
+
+  get ownsTab(): boolean {
+    return this.ownedTabId !== null;
   }
 
   get pane(): string {
@@ -188,12 +199,59 @@ export class Session implements HookHost {
     return session;
   }
 
+  // Reuses the pane herdr-acp itself launched for this session, found through its own pane record.
+  private static async reattach(
+    config: SessionConfig,
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
+    ctx: RequestContext,
+    settings: SessionSettings,
+  ): Promise<Session | null> {
+    const record = await readPaneRecord(config.stateDir, params.sessionId);
+    if (!record || record.kind !== config.driver.kind || record.target !== config.herdr.target) return null;
+    const pane = await config.herdr.getPane(record.paneId);
+    if (!pane) {
+      await deletePaneRecord(config.stateDir, params.sessionId);
+      return null;
+    }
+    const agent = await config.herdr.getAgent(record.paneId).catch(() => null);
+    const ref = agent?.agent_session ? config.driver.sessionIdFromRef(agent.agent_session) : null;
+    const running = agent?.agent === config.driver.kind && (ref === null || ref === params.sessionId);
+    if (agent?.agent && !running) {
+      await deletePaneRecord(config.stateDir, params.sessionId);
+      return null;
+    }
+    const session = new Session(
+      config,
+      ctx.client,
+      params.sessionId,
+      record.cwd,
+      { paneId: record.paneId, tabId: pane.tab_id },
+      { settings, mcpServers: params.mcpServers, canRestart: true },
+    );
+    await session.listenHooks();
+    if (running) {
+      if ((await session.writeEnvFile()) && config.driver.envAcknowledged) await session.waitForEnv();
+      return session;
+    }
+    await session.writeEnvFile();
+    try {
+      await session.start({ resume: await config.driver.transcriptExists(params.sessionId), trusted: true });
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
+    await session.waitForStatus();
+    return session;
+  }
+
   static async load(
     config: SessionConfig,
     params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
     ctx: RequestContext,
   ): Promise<Session | null> {
     const settings = await config.driver.initialSettings(config.extraArgs);
+    const reattached = await Session.reattach(config, params, ctx, settings);
+    if (reattached) return reattached;
     const live = await findLiveAgent(config, params.sessionId);
     if (live) {
       const workspace = (await config.herdr.listWorkspaces()).find((ws) => ws.workspace_id === live.workspace_id);
@@ -202,7 +260,7 @@ export class Session implements HookHost {
         ctx.client,
         params.sessionId,
         live.cwd ?? params.cwd,
-        { paneId: live.pane_id, tabId: null },
+        { paneId: live.pane_id, tabId: null, observedTabId: live.tab_id },
         { settings, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel },
       );
       await session.listenHooks();
@@ -460,6 +518,7 @@ export class Session implements HookHost {
     if (!this.ownedTabId || this.config.keepPanes) return;
     const { herdr, driver, pollMs } = this.config;
     await releasePane(herdr, driver, { paneId: this.paneId, tabId: this.ownedTabId }, { pollMs, timeoutMs: EXIT_WAIT_MS });
+    await deletePaneRecord(this.config.stateDir, this.sessionId);
   }
 
   async dispose(): Promise<void> {
@@ -583,6 +642,7 @@ export class Session implements HookHost {
           timeoutMs: Math.max(5_000, deadline - Date.now()),
         });
         this.paneId = agent.pane_id;
+        await this.recordPane();
         return;
       } catch (error) {
         if (!(error instanceof HerdrError) || Date.now() > deadline) throw error;
@@ -599,6 +659,19 @@ export class Session implements HookHost {
       }
     }
     await this.settleStartup(opts.trusted, deadline);
+    await this.recordPane();
+  }
+
+  private async recordPane(): Promise<void> {
+    if (!this.ownedTabId) return;
+    await writePaneRecord(this.config.stateDir, {
+      sessionId: this.sessionId,
+      kind: this.config.driver.kind,
+      target: this.config.herdr.target,
+      paneId: this.paneId,
+      tabId: this.ownedTabId,
+      cwd: this.cwd,
+    });
   }
 
   private async settleStartup(trustedBeforeLaunch: boolean, deadline: number): Promise<void> {
@@ -767,8 +840,13 @@ async function ensureTrust(config: SessionConfig, cwd: string, ctx: RequestConte
 
 export async function listSessions(config: SessionConfig, cwd?: string | null) {
   const live = new Map<string, AgentInfo>();
+  const recorded = new Map(
+    (await listPaneRecords(config.stateDir))
+      .filter((record) => record.kind === config.driver.kind && record.target === config.herdr.target)
+      .map((record) => [record.paneId, record.sessionId]),
+  );
   for (const agent of await config.herdr.listAgents()) {
-    const id = liveSessionId(config, agent);
+    const id = liveSessionId(config, agent) ?? (agent.agent === config.driver.kind ? recorded.get(agent.pane_id) : undefined);
     if (id) live.set(id, agent);
   }
   const stored = cwd ? await config.driver.listTranscripts(cwd) : [];

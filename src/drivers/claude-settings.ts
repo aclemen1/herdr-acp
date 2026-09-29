@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { access, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,6 +7,25 @@ import { claudeHookSettings } from "./claude-hooks.ts";
 
 type HookEntry = { matcher?: string; hooks?: { command?: string }[] };
 type Settings = Record<string, unknown> & { hooks?: Record<string, HookEntry[]> };
+
+export async function settingsFilePath(destination: string, cwd: string): Promise<string | null> {
+  switch (destination) {
+    case "userSettings":
+      return claudeUserSettingsPath();
+    case "projectSettings":
+      return join(cwd, ".claude", "settings.json");
+    case "localSettings":
+      return join((await gitRoot(cwd)) ?? cwd, ".claude", "settings.local.json");
+    default:
+      return null;
+  }
+}
+
+function gitRoot(cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", cwd, "rev-parse", "--show-toplevel"], (error, stdout) => resolve(error ? null : stdout.trim() || null));
+  });
+}
 
 export function claudeUserSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "settings.json");

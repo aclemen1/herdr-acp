@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { CreateElicitationResponse, SessionUpdate } from "@agentclientprotocol/sdk";
 import { alwaysAllowLabel, answersFromContent, createClaudeHookHandler, type Question, questionsSchema } from "./claude-hooks.ts";
@@ -14,14 +17,16 @@ type FakeHost = HookHost & {
   pending: string | null;
   continuation: { modeId: string; prompt: string } | null;
   statuses: StatusReport[];
+  optionMeta: unknown[][];
 };
 
 function fakeHost(
-  opts: { elicit?: CreateElicitationResponse | null; permission?: (string | null)[]; pending?: string } = {},
+  opts: { elicit?: CreateElicitationResponse | null; permission?: (string | null)[]; pending?: string; cwd?: string } = {},
 ): FakeHost {
   const choices = [...(opts.permission ?? [])];
   const host: FakeHost = {
     sessionId: "s1",
+    cwd: opts.cwd ?? "/work/app",
     updates: [],
     streamed: [],
     announced: [],
@@ -31,6 +36,10 @@ function fakeHost(
     pending: opts.pending ?? null,
     continuation: null,
     statuses: [],
+    optionMeta: [],
+    currentMode: () => "default",
+    endTurn: () => {},
+    envApplied: () => {},
     continueWithMode: (modeId, prompt) => {
       host.continuation = { modeId, prompt };
     },
@@ -61,6 +70,7 @@ function fakeHost(
     },
     requestPermission: async (toolCall, options) => {
       host.permissions.push({ title: toolCall.title ?? "", options: options.map((o) => o.optionId) });
+      host.optionMeta.push(options.map((o) => o._meta ?? null));
       return choices.shift() ?? null;
     },
     elicit: async () => opts.elicit ?? null,
@@ -162,17 +172,41 @@ test("maps permission requests to the announced tool call", async () => {
   assert.deepEqual(host.permissions, [{ title: "Create x", options: ["allow", "reject"] }]);
 });
 
-test("offers always-allow when Claude suggests permission rules", async () => {
-  const host = fakeHost({ permission: ["allow_always"] });
-  const suggestions = [{ type: "addRules", rules: [{ toolName: "Bash" }], behavior: "allow", destination: "session" }];
+test("never lets always-allow write the user settings and exposes the target file", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "herdr-acp-perm-"));
+  const host = fakeHost({ permission: ["allow_always"], cwd });
+  const suggestions = [
+    { type: "addRules", rules: [{ toolName: "Bash", ruleContent: "npm test:*" }], behavior: "allow", destination: "userSettings" },
+    { type: "addRules", rules: [{ toolName: "Read" }], behavior: "allow", destination: "projectSettings" },
+    { type: "setMode", mode: "acceptEdits", destination: "session" },
+  ];
   const output = await createClaudeHookHandler(host)({
     hook_event_name: "PermissionRequest",
     tool_name: "Bash",
-    tool_input: { command: "ls" },
+    tool_input: { command: "npm test" },
     permission_suggestions: suggestions,
   });
+  const resolved = await realpath(cwd);
+  const expectedMeta = {
+    herdr: {
+      suggestions: [
+        { ...suggestions[0], destination: "localSettings", originalDestination: "userSettings", path: join(cwd, ".claude", "settings.local.json") },
+        { ...suggestions[1], path: join(cwd, ".claude", "settings.json") },
+        { ...suggestions[2], path: null },
+      ],
+    },
+  };
+  assert.ok(resolved);
+  assert.deepEqual(host.permissions, [{ title: "npm test", options: ["allow", "allow_always", "reject"] }]);
+  assert.deepEqual(host.optionMeta[0], [null, expectedMeta, null]);
   assert.deepEqual(output, {
-    hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedPermissions: suggestions } },
+    hookSpecificOutput: {
+      hookEventName: "PermissionRequest",
+      decision: {
+        behavior: "allow",
+        updatedPermissions: [{ ...suggestions[0], destination: "localSettings" }, suggestions[1], suggestions[2]],
+      },
+    },
   });
 });
 

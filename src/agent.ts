@@ -47,7 +47,7 @@ export function createAgent(config: SessionConfig, version: string) {
   const describe = (session: Session) => ({
     modes: session.modeState,
     configOptions: session.configOptions,
-    _meta: { herdr: { paneId: session.pane } },
+    _meta: { herdr: { paneId: session.pane, tabId: session.tab, ownsTab: session.ownsTab } },
   });
 
   const app = acp

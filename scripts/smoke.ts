@@ -13,6 +13,8 @@ const { values, positionals } = parseArgs({
     load: { type: "string" },
     close: { type: "boolean", default: false },
     deny: { type: "boolean", default: false },
+    always: { type: "boolean", default: false },
+    "agent-arg": { type: "string", multiple: true },
     ask: { type: "string" },
     "cancel-after": { type: "string" },
     "no-forms": { type: "boolean", default: false },
@@ -36,7 +38,9 @@ const args = ["src/index.ts", "--workspace", values.workspace!];
 if (values["herdr-session"]) args.push("--herdr-session", values["herdr-session"]);
 if (values["trust-folders"]) args.push("--trust-folders");
 if (values.agent) args.push("--agent", values.agent);
-if (values.ask) args.push("--", "--settings", JSON.stringify({ permissions: { ask: [values.ask] } }));
+const agentArgs = [...(values["agent-arg"] ?? [])];
+if (values.ask) agentArgs.push("--settings", JSON.stringify({ permissions: { ask: [values.ask] } }));
+if (agentArgs.length > 0) args.push("--", ...agentArgs);
 const child = spawn(process.execPath, args, { stdio: ["pipe", "pipe", "inherit"] });
 
 const summarize = (options: acp.SessionConfigOption[] | null | undefined) =>
@@ -48,7 +52,9 @@ const log = (label: string, detail: unknown = "") =>
 await acp
   .client({ name: "herdr-acp-smoke" })
   .onRequest("session/request_permission", ({ params }) => {
-    const optionId = values.deny ? "reject" : "allow";
+    const optionId = values.deny ? "reject" : values.always ? "allow_always" : "allow";
+    const always = params.options.find((option) => option.optionId === "allow_always");
+    if (always?._meta) log("ALWAYS_META", always._meta);
     const chosen = params.options.some((option) => option.optionId === optionId)
       ? optionId
       : params.options[values.deny ? params.options.length - 1 : 1]!.optionId;

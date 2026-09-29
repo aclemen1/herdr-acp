@@ -62,6 +62,7 @@ export type LaunchInput = {
 
 export interface HookHost {
   readonly sessionId: string;
+  readonly cwd: string;
   notify(update: SessionUpdate): Promise<void>;
   announceToolCall(toolCallId: string): void;
   settleToolCall(toolCallId: string): void;

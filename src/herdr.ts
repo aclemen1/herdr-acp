@@ -46,9 +46,11 @@ type Envelope<T> = { result?: T; error?: { code: string; message: string } };
 export class Herdr {
   private readonly bin: string;
   private readonly globalArgs: string[];
+  readonly target: string;
 
   constructor(options: HerdrOptions = {}) {
     this.bin = options.bin ?? "herdr";
+    this.target = `${options.session ?? "default"}@${options.machine ?? "local"}`;
     this.globalArgs = [
       ...(options.session ? ["--session", options.session] : []),
       ...(options.machine ? ["--machine", options.machine] : []),
@@ -88,6 +90,15 @@ export class Herdr {
 
   async listAgents(): Promise<AgentInfo[]> {
     return (await this.call<{ agents: AgentInfo[] }>(["agent", "list"])).agents;
+  }
+
+  async getPane(paneId: string): Promise<PaneInfo | null> {
+    try {
+      return (await this.call<{ pane: PaneInfo }>(["pane", "get", paneId])).pane;
+    } catch (error) {
+      if (error instanceof HerdrError) return null;
+      throw error;
+    }
   }
 
   async getAgent(target: string): Promise<AgentInfo> {

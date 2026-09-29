@@ -89,6 +89,7 @@ function host(mode: string, choice: string | null) {
   const log = { updates: [] as SessionUpdate[], streamed: [] as string[], statuses: [] as StatusReport[], ended: false };
   const fake = {
     sessionId: "s",
+    cwd: "/work",
     notify: async (update: SessionUpdate) => {
       log.updates.push(update);
     },

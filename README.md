@@ -88,6 +88,7 @@ A session can also be loaded while it is running in a herdr pane you started you
 
 - **Placement**: each session gets a tab in the herdr workspace `acp`, created with the session's cwd and environment. The agent is started with `herdr agent start`.
 - **Teardown**: on `session/close` or when herdr-acp exits (end of stdin, SIGINT, SIGTERM, SIGHUP), the agent is asked to exit (`/exit`, `/quit` for Pi; up to 5 s) and the tab herdr-acp created is closed. A pane you started yourself and attached with `session/load` is never closed.
+- **Pane records**: herdr-acp remembers which pane it launched for each session (`~/.local/state/herdr-acp/panes/`). A later `session/load` or `session/resume`, even from a new herdr-acp process, reuses that pane: it reattaches to the running agent, or relaunches it with `--resume` if only the shell is left. A new tab is opened only when the pane is gone.
 - **Prompts** are typed into the TUI with `herdr agent prompt`, exactly as you would.
 - **Transcript**: herdr-acp tails the agent's JSONL session file and turns messages, tool calls and results into `session/update` notifications.
 - **Structured callbacks**: Claude Code hooks (`PreToolUse`, `PermissionRequest`, `MessageDisplay`, `UserPromptSubmit`, `SessionStart`, `CwdChanged`, `FileChanged`) and a Pi extension call back into herdr-acp over a per-session unix socket (`~/.local/state/herdr-acp/s/`). This is how permissions, questions, streaming, modes and turn ends are handled without reading the screen.
