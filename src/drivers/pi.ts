@@ -94,6 +94,7 @@ export class PiDriver implements Driver {
   readonly acceptTrustKeys: string[] = [];
   readonly exitCommand = "/quit";
   readonly modeRequiresRestart = false;
+  readonly extensions = {};
   readonly envAcknowledged = false;
   readonly protectedEnv =
     /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY|XAI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|OPENROUTER_API_KEY|DEEPSEEK_API_KEY|CLAUDECODE|CLAUDE_CODE_\w*|CLAUDE_PID|CLAUDE_EFFORT)$/;

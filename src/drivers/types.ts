@@ -104,6 +104,7 @@ export interface Driver {
   readonly protectedEnv: RegExp;
   readonly exitCommand: string;
   readonly modeRequiresRestart: boolean;
+  readonly extensions: Record<string, number>;
   readonly envAcknowledged: boolean;
   replayOrder(records: unknown[]): unknown[];
 }

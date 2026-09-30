@@ -70,6 +70,7 @@ export class ClaudeDriver implements Driver {
 
   readonly exitCommand = "/exit";
   readonly modeRequiresRestart = true;
+  readonly extensions = { permissionSuggestions: 1, rateLimits: 1 };
   readonly envAcknowledged = true;
 
   replayOrder(records: unknown[]): unknown[] {

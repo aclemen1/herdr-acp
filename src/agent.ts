@@ -65,7 +65,14 @@ export function createAgent(config: SessionConfig, version: string) {
           sessionCapabilities: { list: {}, close: {}, resume: {}, fork: {} },
         },
         authMethods: [],
-        _meta: { steering: { supported: true } },
+        _meta: {
+          steering: { supported: true },
+          herdr: {
+            version,
+            agent: config.driver.kind,
+            extensions: { sessionPlacement: 1, ...config.driver.extensions },
+          },
+        },
       };
     })
     .onRequest("authenticate", () => ({}))
