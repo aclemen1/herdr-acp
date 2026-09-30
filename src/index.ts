@@ -28,7 +28,7 @@ Options:
   --exclude-env <list>    Extra variables kept out of panes; NAME* matches a prefix
   --start-timeout <ms>    Agent startup timeout (default: 60000)
   --trust-folders         Accept the agent's folder trust dialog when the ACP client cannot be asked
-  --keep-panes            Leave session tabs open when a session closes or herdr-acp exits
+  --close-panes-on-exit   Also close the tabs it created when herdr-acp exits (session/close always does)
   -h, --help              Show this help
 
 Environment fallbacks: HERDR_ACP_AGENT, HERDR_ACP_WORKSPACE, HERDR_ACP_HERDR_SESSION,
@@ -56,7 +56,7 @@ const { values, positionals } = parseArgs({
     "exclude-env": { type: "string" },
     "start-timeout": { type: "string" },
     "trust-folders": { type: "boolean" },
-    "keep-panes": { type: "boolean" },
+    "close-panes-on-exit": { type: "boolean" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -104,7 +104,7 @@ const { app, disposeAll } = createAgent(
     pollMs: 300,
     idleSettleMs: 2_500,
     trustFolders: values["trust-folders"] ?? env.HERDR_ACP_TRUST_FOLDERS === "1",
-    keepPanes: values["keep-panes"] ?? env.HERDR_ACP_KEEP_PANES === "1",
+    closePanesOnExit: values["close-panes-on-exit"] ?? env.HERDR_ACP_CLOSE_PANES_ON_EXIT === "1",
     client: { capabilities: null },
   },
   readVersion(),

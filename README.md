@@ -46,7 +46,7 @@ exec herdr-acp --trust-folders "$@"
 
 `--trust-folders` is needed there because Paperclip runs agents in fresh worktrees and cannot answer the folder trust question.
 
-Paperclip starts a new herdr-acp for every run and resumes the conversation with `session/load`. When a run ends (`session/close`, end of stdin, or SIGTERM), herdr-acp exits the agent and closes the tab it created, so tabs do not pile up in the `acp` workspace; the next run resumes the transcript in a new tab. Add `--keep-panes` to the wrapper to keep them open.
+Paperclip starts a new herdr-acp for every run and resumes the conversation with `session/load`. When herdr-acp exits (end of stdin or SIGTERM), the agent keeps running in its tab, and the next run reattaches to that same pane. `session/close` exits the agent and closes the tab. Add `--close-panes-on-exit` to the wrapper to close the tabs at the end of every run instead, which frees the agent processes between runs; the next run then resumes the transcript in a new tab.
 
 ## Options
 
@@ -57,7 +57,7 @@ Paperclip starts a new herdr-acp for every run and resumes the conversation with
 | `--herdr-session <name>` | `HERDR_ACP_HERDR_SESSION` | Named herdr session |
 | `--machine <label>` | `HERDR_ACP_MACHINE` | Saved herdr SSH machine |
 | `--trust-folders` | `HERDR_ACP_TRUST_FOLDERS=1` | Accept the folder trust question when the client cannot be asked |
-| `--keep-panes` | `HERDR_ACP_KEEP_PANES=1` | Leave session tabs open on `session/close` and on exit (debugging) |
+| `--close-panes-on-exit` | `HERDR_ACP_CLOSE_PANES_ON_EXIT=1` | Also close the tabs herdr-acp created when it exits. `session/close` always closes them |
 | `--forward-env <list>` | `HERDR_ACP_FORWARD_ENV` | Variables forwarded even when protected (e.g. `ANTHROPIC_API_KEY`) |
 | `--exclude-env <list>` | `HERDR_ACP_EXCLUDE_ENV` | Extra variables kept out of panes (`NAME*` matches a prefix) |
 | `--start-timeout <ms>` | | Agent startup timeout (default 60000) |

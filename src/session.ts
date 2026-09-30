@@ -39,7 +39,7 @@ export type SessionConfig = {
   pollMs: number;
   idleSettleMs: number;
   trustFolders: boolean;
-  keepPanes: boolean;
+  closePanesOnExit: boolean;
   client: { capabilities: ClientCapabilities | null };
 };
 
@@ -510,12 +510,12 @@ export class Session implements HookHost {
 
   // Process exit: a tab herdr-acp created goes away with it; a pane attached by session/load stays untouched.
   async shutdown(): Promise<void> {
-    if (!this.ownedTabId || this.config.keepPanes) return this.dispose();
+    if (!this.ownedTabId || !this.config.closePanesOnExit) return this.dispose();
     await this.close();
   }
 
   private async releaseOwnedTab(): Promise<void> {
-    if (!this.ownedTabId || this.config.keepPanes) return;
+    if (!this.ownedTabId) return;
     const { herdr, driver, pollMs } = this.config;
     await releasePane(herdr, driver, { paneId: this.paneId, tabId: this.ownedTabId }, { pollMs, timeoutMs: EXIT_WAIT_MS });
     await deletePaneRecord(this.config.stateDir, this.sessionId);
