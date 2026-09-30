@@ -1,12 +1,38 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
-import { listSessions, Session, type RequestContext, type SessionConfig, type SteerOutcome } from "./session.ts";
+import {
+  type InitialConfig,
+  listSessions,
+  Session,
+  type RequestContext,
+  type SessionConfig,
+  type SteerOutcome,
+} from "./session.ts";
 
 type SteerParams = {
   sessionId: string;
   prompt: acp.ContentBlock[];
   _meta?: { steering?: { idleBehavior?: string } };
 };
+
+function parseInitialConfig(meta: unknown): InitialConfig | undefined {
+  const raw = (meta as { herdr?: { config?: unknown } } | null | undefined)?.herdr?.config;
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw RequestError.invalidParams({ config: raw }, "_meta.herdr.config must be an object");
+  }
+  const initial: InitialConfig = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key !== "mode" && key !== "model" && key !== "effort") {
+      throw RequestError.invalidParams({ configId: key }, `unknown config option in _meta.herdr.config: ${key}`);
+    }
+    if (typeof value !== "string") {
+      throw RequestError.invalidParams({ configId: key, value }, `_meta.herdr.config.${key} must be a string`);
+    }
+    initial[key] = value;
+  }
+  return initial;
+}
 
 function parseSteerParams(raw: unknown): SteerParams {
   const params = (raw ?? {}) as Partial<SteerParams>;
@@ -70,14 +96,15 @@ export function createAgent(config: SessionConfig, version: string) {
           herdr: {
             version,
             agent: config.driver.kind,
-            extensions: { sessionPlacement: 1, ...config.driver.extensions },
+            extensions: { sessionPlacement: 1, sessionConfig: 1, ...config.driver.extensions },
           },
         },
       };
     })
     .onRequest("authenticate", () => ({}))
     .onRequest("session/new", async ({ params, client, requestId }) => {
-      const session = await Session.create(config, params, { client, requestId });
+      const initial = parseInitialConfig(params._meta);
+      const session = await Session.create(config, { ...params, ...(initial ? { initial } : {}) }, { client, requestId });
       sessions.set(session.sessionId, session);
       return { sessionId: session.sessionId, ...describe(session) };
     })

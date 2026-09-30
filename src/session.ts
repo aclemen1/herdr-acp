@@ -58,6 +58,23 @@ type Turn = {
 
 export type SteerOutcome = { outcome: "injected" | "startedNewTurn" | "promptRequired"; reason?: string };
 type LaunchChange = { mode?: string; model?: string; effort?: string };
+export type InitialConfig = { mode?: string; model?: string; effort?: string };
+
+const INITIAL_CONFIG_KEYS = ["mode", "model", "effort"] as const;
+
+function validateInitialConfig(config: SessionConfig, settings: SessionSettings, initial: InitialConfig): InitialConfig {
+  const options = config.driver.configOptions(settings, config.driver.availableModes(config.extraArgs), null);
+  const valid: InitialConfig = {};
+  for (const key of INITIAL_CONFIG_KEYS) {
+    const value = initial[key];
+    if (value === undefined) continue;
+    if (!selectValues(options, key).includes(value)) {
+      throw RequestError.invalidParams({ configId: key, value }, `unsupported value for ${key}: ${value}`);
+    }
+    valid[key] = value;
+  }
+  return valid;
+}
 
 const STATUS_WAIT_MS = 3_000;
 const ENV_WAIT_MS = 3_000;
@@ -85,7 +102,7 @@ export class Session implements HookHost {
   private turn: Turn | null = null;
   private readonly modes: SessionMode[];
   private readonly settings: SessionSettings;
-  private readonly overrides: { model?: string; effort?: string } = {};
+  private readonly overrides: { model?: string; effort?: string };
   private pendingMode: string | null = null;
   private pendingConfig: { model?: string; effort?: string } = {};
   private restarting: Promise<void> = Promise.resolve();
@@ -110,7 +127,12 @@ export class Session implements HookHost {
     id: string,
     cwd: string,
     placement: Placement,
-    init: { settings: SessionSettings; mcpServers: McpServer[]; canRestart: boolean },
+    init: {
+      settings: SessionSettings;
+      mcpServers: McpServer[];
+      canRestart: boolean;
+      overrides?: { model?: string; effort?: string };
+    },
   ) {
     this.config = config;
     this.client = client;
@@ -122,6 +144,7 @@ export class Session implements HookHost {
     this.parser = config.driver.createParser();
     this.modes = config.driver.availableModes(config.extraArgs);
     this.settings = { ...init.settings };
+    this.overrides = { ...(init.overrides ?? {}) };
     this.mcpServers = init.mcpServers;
     this.canRestart = init.canRestart;
   }
@@ -148,22 +171,24 @@ export class Session implements HookHost {
 
   static async create(
     config: SessionConfig,
-    params: { cwd: string; mcpServers: McpServer[] },
+    params: { cwd: string; mcpServers: McpServer[]; initial?: InitialConfig },
     ctx: RequestContext,
   ): Promise<Session> {
+    const settings = await config.driver.initialSettings(config.extraArgs);
+    const initial = validateInitialConfig(config, settings, params.initial ?? {});
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
     const placement = await placePane(config, id, params.cwd);
-    const settings = await config.driver.initialSettings(config.extraArgs);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
-      settings,
+      settings: { ...settings, ...initial },
       mcpServers: params.mcpServers,
       canRestart: true,
+      overrides: { ...(initial.model ? { model: initial.model } : {}), ...(initial.effort ? { effort: initial.effort } : {}) },
     });
     await session.listenHooks();
     await session.writeEnvFile();
     try {
-      await session.start({ resume: false, trusted });
+      await session.start({ resume: false, trusted, ...(initial.mode ? { mode: initial.mode } : {}) });
     } catch (error) {
       await session.close();
       throw error;

@@ -84,6 +84,19 @@ Panes receive the environment herdr-acp was started with, minus terminal variabl
 
 A session can also be loaded while it is running in a herdr pane you started yourself: `session/list` shows live agents and stored transcripts.
 
+## herdr extensions (`_meta.herdr`)
+
+`initialize` announces them under `_meta.herdr`: `{ version, agent, extensions }`, each extension with a version number.
+
+| Extension | Where | Shape |
+|---|---|---|
+| `sessionPlacement` | response `_meta` of `session/new`, `load`, `resume`, `fork` | `{ herdr: { paneId, tabId, ownsTab } }` |
+| `sessionConfig` | request `_meta` of `session/new` | `{ herdr: { config: { mode?, model?, effort? } } }`, values from the session's config options; applied at launch; an unknown key or value fails with `-32602` before any tab is created |
+| `permissionSuggestions` (Claude) | `_meta` of the `allow_always` permission option | `{ herdr: { suggestions: [{ ...Claude suggestion, destination, originalDestination?, path }] } }`; `userSettings` is always redirected to `localSettings` |
+| `rateLimits` (Claude) | `_meta` of `session/prompt` responses | `{ herdr: { rateLimits } }`, as reported by Claude's status line |
+
+`_session/steering` is announced separately as `_meta.steering.supported`.
+
 ## How it works
 
 - **Placement**: each session gets a tab in the herdr workspace `acp`, created with the session's cwd and environment. The agent is started with `herdr agent start`.

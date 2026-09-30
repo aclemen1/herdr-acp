@@ -21,6 +21,7 @@ const { values, positionals } = parseArgs({
     "trust-folders": { type: "boolean", default: false },
     "set-mode": { type: "string" },
     agent: { type: "string" },
+    "initial-config": { type: "string" },
     config: { type: "string", multiple: true },
     resume: { type: "string" },
     fork: { type: "string" },
@@ -131,7 +132,11 @@ await acp
         sessionId = values.load;
         log("LOADED", loaded);
       } else {
-        const created = await ctx.request("session/new", { cwd: values.cwd!, mcpServers: [] });
+        const created = await ctx.request("session/new", {
+          cwd: values.cwd!,
+          mcpServers: [],
+          ...(values["initial-config"] ? { _meta: { herdr: { config: JSON.parse(values["initial-config"]) } } } : {}),
+        });
         sessionId = created.sessionId;
         log("NEW", {
           sessionId: created.sessionId,
