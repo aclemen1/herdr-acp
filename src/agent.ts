@@ -59,12 +59,13 @@ export function createAgent(config: SessionConfig, version: string) {
   };
 
   const attach = async (
-    params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[] | null },
+    params: { sessionId: string; cwd: string; mcpServers?: acp.McpServer[] | null; _meta?: unknown },
     ctx: RequestContext,
   ): Promise<Session> => {
     const existing = sessions.get(params.sessionId);
     if (existing) return existing;
-    const session = await Session.load(config, { ...params, mcpServers: params.mcpServers ?? [] }, ctx);
+    const takeover = (params._meta as { herdr?: { takeover?: unknown } } | null | undefined)?.herdr?.takeover === true;
+    const session = await Session.load(config, { ...params, mcpServers: params.mcpServers ?? [], takeover }, ctx);
     if (!session) throw RequestError.resourceNotFound(params.sessionId);
     sessions.set(session.sessionId, session);
     return session;
@@ -96,7 +97,7 @@ export function createAgent(config: SessionConfig, version: string) {
           herdr: {
             version,
             agent: config.driver.kind,
-            extensions: { sessionPlacement: 1, sessionConfig: 1, ...config.driver.extensions },
+            extensions: { sessionPlacement: 1, sessionConfig: 1, sessionOwnership: 1, ...config.driver.extensions },
           },
         },
       };

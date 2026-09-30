@@ -93,6 +93,7 @@ A session can also be loaded while it is running in a herdr pane you started you
 | `sessionPlacement` | response `_meta` of `session/new`, `load`, `resume`, `fork` | `{ herdr: { paneId, tabId, ownsTab } }` |
 | `sessionConfig` | request `_meta` of `session/new` | `{ herdr: { config: { mode?, model?, effort? } } }`, values from the session's config options; applied at launch; an unknown key or value fails with `-32602` before any tab is created |
 | `permissionSuggestions` (Claude) | `_meta` of the `allow_always` permission option | `{ herdr: { suggestions: [{ ...Claude suggestion, destination, originalDestination?, path }] } }`; `userSettings` is always redirected to `localSettings` |
+| `sessionOwnership` | request `_meta` of `session/load`, `resume` | one herdr-acp process owns a session at a time. Loading a session held by another live process fails with `-32010`, unless `{ herdr: { takeover: true } }` is passed; the former owner's next prompt then fails with `-32010` too |
 | `rateLimits` (Claude) | `_meta` of `session/prompt` responses | `{ herdr: { rateLimits } }`, as reported by Claude's status line |
 
 `_session/steering` is announced separately as `_meta.steering.supported`.

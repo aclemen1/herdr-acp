@@ -22,6 +22,8 @@ const { values, positionals } = parseArgs({
     "set-mode": { type: "string" },
     agent: { type: "string" },
     "initial-config": { type: "string" },
+    takeover: { type: "boolean", default: false },
+    pause: { type: "string" },
     config: { type: "string", multiple: true },
     resume: { type: "string" },
     fork: { type: "string" },
@@ -128,7 +130,12 @@ await acp
         sessionId = values.resume;
         log("RESUMED", summarize(resumed.configOptions));
       } else if (values.load) {
-        const loaded = await ctx.request("session/load", { sessionId: values.load, cwd: values.cwd!, mcpServers: [] });
+        const loaded = await ctx.request("session/load", {
+          sessionId: values.load,
+          cwd: values.cwd!,
+          mcpServers: [],
+          ...(values.takeover ? { _meta: { herdr: { takeover: true } } } : {}),
+        });
         sessionId = values.load;
         log("LOADED", loaded);
       } else {
@@ -155,7 +162,8 @@ await acp
         const result = await ctx.request("session/set_config_option", { sessionId, configId, value });
         log("SET_CONFIG", { configId, value, ms: Date.now() - started, config: summarize(result.configOptions) });
       }
-      for (const text of prompts) {
+      for (const [index, text] of prompts.entries()) {
+        if (index > 0 && values.pause) await new Promise((resolve) => setTimeout(resolve, Number(values.pause)));
         log("PROMPT", text);
         const started = Date.now();
         if (values["cancel-after"]) {

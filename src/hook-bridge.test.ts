@@ -81,3 +81,13 @@ test("keeps watching the session env after a directory change", async () => {
   });
   assert.deepEqual(JSON.parse(stdout), { hookSpecificOutput: { hookEventName: "CwdChanged", watchPaths: [envFile] } });
 });
+
+test("a closing server leaves a socket that another server took over", async () => {
+  const path = socketPath(await mkdtemp(join(tmpdir(), "hacp-")), "shared");
+  const first = await HookServer.listen(path, async () => "first");
+  const second = await HookServer.listen(path, async () => ({ from: "second" }));
+  await first.close();
+  const result = await runHook(path, { hook_event_name: "PreToolUse" });
+  assert.deepEqual(JSON.parse(result.stdout), { from: "second" });
+  await second.close();
+});

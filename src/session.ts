@@ -24,6 +24,7 @@ import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, Trans
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
 import { envFilePath, hookCommand, HookServer, renderEnvFile, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
+import { acquireOwnership, checkOwnership, type Owner, releaseOwnership } from "./ownership.ts";
 import { deletePaneRecord, listPaneRecords, readPaneRecord, writePaneRecord } from "./pane-records.ts";
 import { releasePane, stopAgent } from "./pane-release.ts";
 import { promptToText } from "./prompt.ts";
@@ -100,6 +101,7 @@ export class Session implements HookHost {
   private readonly parser: TranscriptParser;
   private hookServer: HookServer | null = null;
   private turn: Turn | null = null;
+  owner: Owner | null = null;
   private readonly modes: SessionMode[];
   private readonly settings: SessionSettings;
   private readonly overrides: { model?: string; effort?: string };
@@ -178,6 +180,7 @@ export class Session implements HookHost {
     const initial = validateInitialConfig(config, settings, params.initial ?? {});
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
+    const owner = await acquireOwnership(config.stateDir, id, false);
     const placement = await placePane(config, id, params.cwd);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
       settings: { ...settings, ...initial },
@@ -185,6 +188,7 @@ export class Session implements HookHost {
       canRestart: true,
       overrides: { ...(initial.model ? { model: initial.model } : {}), ...(initial.effort ? { effort: initial.effort } : {}) },
     });
+    session.owner = owner;
     await session.listenHooks();
     await session.writeEnvFile();
     try {
@@ -205,6 +209,7 @@ export class Session implements HookHost {
     if (!(await config.driver.transcriptExists(params.sessionId))) return null;
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
+    const owner = await acquireOwnership(config.stateDir, id, false);
     const placement = await placePane(config, id, params.cwd);
     const settings = await config.driver.initialSettings(config.extraArgs);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
@@ -212,6 +217,7 @@ export class Session implements HookHost {
       mcpServers: params.mcpServers,
       canRestart: true,
     });
+    session.owner = owner;
     await session.listenHooks();
     await session.writeEnvFile();
     try {
@@ -270,6 +276,23 @@ export class Session implements HookHost {
   }
 
   static async load(
+    config: SessionConfig,
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; takeover?: boolean },
+    ctx: RequestContext,
+  ): Promise<Session | null> {
+    const owner = await acquireOwnership(config.stateDir, params.sessionId, params.takeover === true);
+    try {
+      const session = await Session.attach(config, params, ctx);
+      if (!session) await releaseOwnership(config.stateDir, params.sessionId, owner);
+      else session.owner = owner;
+      return session;
+    } catch (error) {
+      await releaseOwnership(config.stateDir, params.sessionId, owner);
+      throw error;
+    }
+  }
+
+  private static async attach(
     config: SessionConfig,
     params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
     ctx: RequestContext,
@@ -340,6 +363,13 @@ export class Session implements HookHost {
   }
 
   async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
+    try {
+      if (this.owner) await checkOwnership(this.config.stateDir, this.sessionId, this.owner);
+    } catch (error) {
+      await this.hookServer?.close();
+      this.hookServer = null;
+      throw error;
+    }
     const generation = this.cancelGeneration;
     const run = this.promptChain.then(() =>
       generation === this.cancelGeneration ? this.runPrompt(blocks) : { stopReason: "cancelled" as const },
@@ -549,6 +579,7 @@ export class Session implements HookHost {
   async dispose(): Promise<void> {
     await this.hookServer?.close();
     this.hookServer = null;
+    if (this.owner) await releaseOwnership(this.config.stateDir, this.sessionId, this.owner);
   }
 
   async notify(update: SessionUpdate): Promise<void> {

@@ -25,8 +25,8 @@ function initialize(args: string[]): Promise<Record<string, unknown>> {
 test("announces herdr extensions per agent at initialize", async () => {
   const claude = (await initialize([]))._meta as { herdr: { agent: string; extensions: Record<string, number> } };
   assert.equal(claude.herdr.agent, "claude");
-  assert.deepEqual(Object.keys(claude.herdr.extensions).sort(), ["permissionSuggestions", "rateLimits", "sessionConfig", "sessionPlacement"]);
+  assert.deepEqual(Object.keys(claude.herdr.extensions).sort(), ["permissionSuggestions", "rateLimits", "sessionConfig", "sessionOwnership", "sessionPlacement"]);
   const pi = (await initialize(["--agent", "pi"]))._meta as { herdr: { agent: string; extensions: Record<string, number> } };
   assert.equal(pi.herdr.agent, "pi");
-  assert.deepEqual(Object.keys(pi.herdr.extensions).sort(), ["sessionConfig", "sessionPlacement"]);
+  assert.deepEqual(Object.keys(pi.herdr.extensions).sort(), ["sessionConfig", "sessionOwnership", "sessionPlacement"]);
 });

@@ -1,11 +1,11 @@
 import { accessSync, constants } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, readlink, rename, symlink, unlink } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MAX_SOCKET_PATH = 100;
+const MAX_SOCKET_PATH = 92;
 
 export const GLOBAL_HOOK_MARKER = "herdr-acp-hook";
 
@@ -61,32 +61,45 @@ function shellQuote(value: string): string {
 
 export type HookHandler = (input: unknown) => Promise<unknown | null>;
 
+let serverCount = 0;
+
+// The stable path is a symlink to a per-process socket, so a takeover swaps the link atomically and
+// closing an old server (libuv unlinks its own socket file) never removes the new owner's socket.
 export class HookServer {
   readonly path: string;
   private readonly server: Server;
+  private readonly boundPath: string;
 
-  private constructor(path: string, server: Server) {
+  private constructor(path: string, server: Server, boundPath: string) {
     this.path = path;
     this.server = server;
+    this.boundPath = boundPath;
   }
 
   static async listen(path: string, handler: HookHandler): Promise<HookServer> {
-    await mkdir(join(path, ".."), { recursive: true, mode: 0o700 });
-    await unlink(path).catch(() => undefined);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const boundPath = `${path}.${process.pid}-${++serverCount}`;
+    await unlink(boundPath).catch(() => undefined);
     const server = createServer((socket) => serve(socket, handler));
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
-      server.listen(path, () => {
+      server.listen(boundPath, () => {
         server.off("error", reject);
         resolve();
       });
     });
-    return new HookServer(path, server);
+    const link = `${boundPath}.link`;
+    await unlink(link).catch(() => undefined);
+    await symlink(basename(boundPath), link);
+    await rename(link, path);
+    return new HookServer(path, server, boundPath);
   }
 
   async close(): Promise<void> {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
-    await unlink(this.path).catch(() => undefined);
+    await unlink(this.boundPath).catch(() => undefined);
+    const target = await readlink(this.path).catch(() => null);
+    if (target === basename(this.boundPath)) await unlink(this.path).catch(() => undefined);
   }
 }
 
