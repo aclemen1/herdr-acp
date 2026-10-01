@@ -10,6 +10,7 @@ import type { Driver } from "./drivers/types.ts";
 import { Herdr } from "./herdr.ts";
 import { defaultStateDir, hookCommand } from "./hook-bridge.ts";
 import { paneEnv, parseList } from "./pane-env.ts";
+import { isInteraction } from "./session-prefs.ts";
 
 const USAGE = `Usage: herdr-acp [options] [-- <agent args>...]
        herdr-acp install-hooks [--agent <kind>]
@@ -29,10 +30,13 @@ Options:
   --start-timeout <ms>    Agent startup timeout (default: 60000)
   --trust-folders         Accept the agent's folder trust dialog when the ACP client cannot be asked
   --close-panes-on-exit   Also close the tabs it created when herdr-acp exits (session/close always does)
+  --interaction <mode>    Default interaction of new sessions: client (questions and permissions go to the
+                          ACP client) or native (they stay in the agent's TUI). Default: client
   -h, --help              Show this help
 
 Environment fallbacks: HERDR_ACP_AGENT, HERDR_ACP_WORKSPACE, HERDR_ACP_HERDR_SESSION,
-HERDR_ACP_MACHINE, HERDR_ACP_FORWARD_ENV, HERDR_ACP_EXCLUDE_ENV, HERDR_ACP_TRUST_FOLDERS=1.
+HERDR_ACP_MACHINE, HERDR_ACP_FORWARD_ENV, HERDR_ACP_EXCLUDE_ENV, HERDR_ACP_TRUST_FOLDERS=1,
+HERDR_ACP_CLOSE_PANES_ON_EXIT=1, HERDR_ACP_INTERACTION.
 
 Panes receive the environment herdr-acp was started with, minus terminal variables (PATH, TERM,
 SHELL, HERDR_*, …) and the agent's protected variables (API keys, internal markers).`;
@@ -57,6 +61,7 @@ const { values, positionals } = parseArgs({
     "start-timeout": { type: "string" },
     "trust-folders": { type: "boolean" },
     "close-panes-on-exit": { type: "boolean" },
+    interaction: { type: "string" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -85,6 +90,11 @@ if (command) {
 }
 
 const driver = makeDriver();
+const defaultInteraction = values.interaction ?? env.HERDR_ACP_INTERACTION ?? "client";
+if (!isInteraction(defaultInteraction)) {
+  process.stderr.write(`herdr-acp: unsupported interaction "${defaultInteraction}" (supported: client, native)\n`);
+  process.exit(2);
+}
 const { app, disposeAll } = createAgent(
   {
     herdr: new Herdr({
@@ -105,6 +115,7 @@ const { app, disposeAll } = createAgent(
     idleSettleMs: 2_500,
     trustFolders: values["trust-folders"] ?? env.HERDR_ACP_TRUST_FOLDERS === "1",
     closePanesOnExit: values["close-panes-on-exit"] ?? env.HERDR_ACP_CLOSE_PANES_ON_EXIT === "1",
+    defaultInteraction,
     client: { capabilities: null },
   },
   readVersion(),

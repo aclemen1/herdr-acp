@@ -64,7 +64,7 @@ export class ClaudeDriver implements Driver {
     const model = input.model ?? (argValue(tail, "--model") ? undefined : process.env.ANTHROPIC_MODEL);
     if (model) tail = [...withoutArg(tail, "--model"), ...(model === "default" ? [] : ["--model", model])];
     if (input.effort) tail = [...withoutArg(tail, "--effort"), ...(input.effort === "default" ? [] : ["--effort", input.effort])];
-    if (!input.clientCanElicit) tail = [...tail, "--disallowedTools", "AskUserQuestion"];
+    if (!input.clientCanElicit && input.interaction === "client") tail = [...tail, "--disallowedTools", "AskUserQuestion"];
     return [...args, ...tail];
   }
 

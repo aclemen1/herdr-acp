@@ -54,6 +54,7 @@ export type LaunchInput = {
   statusLineCommand: string;
   clientCanElicit: boolean;
   trustApproved: boolean;
+  interaction: "client" | "native";
   mode?: string;
   model?: string;
   effort?: string;
@@ -68,6 +69,7 @@ export interface HookHost {
   settleToolCall(toolCallId: string): void;
   streamText(text: string, kind?: "message" | "thought"): Promise<void>;
   currentMode(): string;
+  interaction(): "client" | "native";
   endTurn(): void;
   requestPermission(toolCall: ToolCallUpdate, options: PermissionOption[]): Promise<string | null>;
   availableModeIds(): string[];

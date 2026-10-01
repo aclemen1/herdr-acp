@@ -99,6 +99,7 @@ function host(mode: string, choice: string | null) {
       log.streamed.push(`${kind ?? "message"}:${text}`);
     },
     currentMode: () => mode,
+    interaction: () => "client" as const,
     endTurn: () => {
       log.ended = true;
     },

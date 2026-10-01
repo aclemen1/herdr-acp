@@ -24,6 +24,7 @@ import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, Trans
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
 import { envFilePath, hookCommand, HookServer, renderEnvFile, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
+import { type Interaction, readSessionPrefs, writeSessionPrefs } from "./session-prefs.ts";
 import { acquireOwnership, checkOwnership, type Owner, releaseOwnership } from "./ownership.ts";
 import { deletePaneRecord, listPaneRecords, readPaneRecord, writePaneRecord } from "./pane-records.ts";
 import { releasePane, stopAgent } from "./pane-release.ts";
@@ -41,6 +42,7 @@ export type SessionConfig = {
   idleSettleMs: number;
   trustFolders: boolean;
   closePanesOnExit: boolean;
+  defaultInteraction: Interaction;
   client: { capabilities: ClientCapabilities | null };
 };
 
@@ -102,6 +104,7 @@ export class Session implements HookHost {
   private hookServer: HookServer | null = null;
   private turn: Turn | null = null;
   owner: Owner | null = null;
+  private readonly interactionMode: Interaction;
   private readonly modes: SessionMode[];
   private readonly settings: SessionSettings;
   private readonly overrides: { model?: string; effort?: string };
@@ -133,6 +136,7 @@ export class Session implements HookHost {
       settings: SessionSettings;
       mcpServers: McpServer[];
       canRestart: boolean;
+      interaction: Interaction;
       overrides?: { model?: string; effort?: string };
     },
   ) {
@@ -147,6 +151,7 @@ export class Session implements HookHost {
     this.modes = config.driver.availableModes(config.extraArgs);
     this.settings = { ...init.settings };
     this.overrides = { ...(init.overrides ?? {}) };
+    this.interactionMode = init.interaction;
     this.mcpServers = init.mcpServers;
     this.canRestart = init.canRestart;
   }
@@ -173,19 +178,22 @@ export class Session implements HookHost {
 
   static async create(
     config: SessionConfig,
-    params: { cwd: string; mcpServers: McpServer[]; initial?: InitialConfig },
+    params: { cwd: string; mcpServers: McpServer[]; initial?: InitialConfig; interaction?: Interaction },
     ctx: RequestContext,
   ): Promise<Session> {
+    const interaction = params.interaction ?? config.defaultInteraction;
     const settings = await config.driver.initialSettings(config.extraArgs);
     const initial = validateInitialConfig(config, settings, params.initial ?? {});
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
     const owner = await acquireOwnership(config.stateDir, id, false);
+    await writeSessionPrefs(config.stateDir, id, { interaction });
     const placement = await placePane(config, id, params.cwd);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
       settings: { ...settings, ...initial },
       mcpServers: params.mcpServers,
       canRestart: true,
+      interaction,
       overrides: { ...(initial.model ? { model: initial.model } : {}), ...(initial.effort ? { effort: initial.effort } : {}) },
     });
     session.owner = owner;
@@ -203,19 +211,23 @@ export class Session implements HookHost {
 
   static async fork(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction?: Interaction },
     ctx: RequestContext,
   ): Promise<Session | null> {
     if (!(await config.driver.transcriptExists(params.sessionId))) return null;
+    const interaction =
+      params.interaction ?? (await readSessionPrefs(config.stateDir, params.sessionId)).interaction ?? config.defaultInteraction;
     const trusted = await ensureTrust(config, params.cwd, ctx);
     const id = config.driver.newSessionId();
     const owner = await acquireOwnership(config.stateDir, id, false);
+    await writeSessionPrefs(config.stateDir, id, { interaction });
     const placement = await placePane(config, id, params.cwd);
     const settings = await config.driver.initialSettings(config.extraArgs);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
       settings,
       mcpServers: params.mcpServers,
       canRestart: true,
+      interaction,
     });
     session.owner = owner;
     await session.listenHooks();
@@ -233,7 +245,7 @@ export class Session implements HookHost {
   // Reuses the pane herdr-acp itself launched for this session, found through its own pane record.
   private static async reattach(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction },
     ctx: RequestContext,
     settings: SessionSettings,
   ): Promise<Session | null> {
@@ -257,7 +269,7 @@ export class Session implements HookHost {
       params.sessionId,
       record.cwd,
       { paneId: record.paneId, tabId: pane.tab_id },
-      { settings, mcpServers: params.mcpServers, canRestart: true },
+      { settings, mcpServers: params.mcpServers, canRestart: true, interaction: params.interaction },
     );
     await session.listenHooks();
     if (running) {
@@ -277,12 +289,15 @@ export class Session implements HookHost {
 
   static async load(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; takeover?: boolean },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; takeover?: boolean; interaction?: Interaction },
     ctx: RequestContext,
   ): Promise<Session | null> {
     const owner = await acquireOwnership(config.stateDir, params.sessionId, params.takeover === true);
     try {
-      const session = await Session.attach(config, params, ctx);
+      const stored = (await readSessionPrefs(config.stateDir, params.sessionId)).interaction;
+      const interaction = params.interaction ?? stored ?? config.defaultInteraction;
+      if (interaction !== stored) await writeSessionPrefs(config.stateDir, params.sessionId, { interaction });
+      const session = await Session.attach(config, { ...params, interaction }, ctx);
       if (!session) await releaseOwnership(config.stateDir, params.sessionId, owner);
       else session.owner = owner;
       return session;
@@ -294,7 +309,7 @@ export class Session implements HookHost {
 
   private static async attach(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[] },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction },
     ctx: RequestContext,
   ): Promise<Session | null> {
     const settings = await config.driver.initialSettings(config.extraArgs);
@@ -309,7 +324,7 @@ export class Session implements HookHost {
         params.sessionId,
         live.cwd ?? params.cwd,
         { paneId: live.pane_id, tabId: null, observedTabId: live.tab_id },
-        { settings, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel },
+        { settings, mcpServers: params.mcpServers, canRestart: workspace?.label === config.workspaceLabel, interaction: params.interaction },
       );
       await session.listenHooks();
       if ((await session.writeEnvFile()) && config.driver.envAcknowledged) await session.waitForEnv();
@@ -322,6 +337,7 @@ export class Session implements HookHost {
       settings,
       mcpServers: params.mcpServers,
       canRestart: true,
+      interaction: params.interaction,
     });
     await session.listenHooks();
     await session.writeEnvFile();
@@ -605,6 +621,10 @@ export class Session implements HookHost {
     });
   }
 
+  interaction(): Interaction {
+    return this.interactionMode;
+  }
+
   currentMode(): string {
     return this.settings.mode;
   }
@@ -682,6 +702,7 @@ export class Session implements HookHost {
       statusLineCommand: statusLineCommand(),
       clientCanElicit: Boolean(this.config.client.capabilities?.elicitation?.form),
       trustApproved: !opts.trusted,
+      interaction: this.interactionMode,
       ...(opts.mode ? { mode: opts.mode } : {}),
       ...(opts.forkFrom ? { forkFrom: opts.forkFrom } : {}),
       ...this.overrides,

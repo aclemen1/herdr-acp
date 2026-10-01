@@ -23,6 +23,7 @@ const { values, positionals } = parseArgs({
     agent: { type: "string" },
     "initial-config": { type: "string" },
     takeover: { type: "boolean", default: false },
+    interaction: { type: "string" },
     pause: { type: "string" },
     config: { type: "string", multiple: true },
     resume: { type: "string" },
@@ -48,6 +49,11 @@ const child = spawn(process.execPath, args, { stdio: ["pipe", "pipe", "inherit"]
 
 const summarize = (options: acp.SessionConfigOption[] | null | undefined) =>
   Object.fromEntries((options ?? []).map((option) => [option.id, option.type === "select" ? option.currentValue : option.currentValue]));
+
+const herdrMeta = (extra: Record<string, unknown> = {}) => {
+  const herdr = { ...extra, ...(values.interaction ? { interaction: values.interaction } : {}) };
+  return Object.keys(herdr).length > 0 ? { _meta: { herdr } } : {};
+};
 
 const log = (label: string, detail: unknown = "") =>
   process.stdout.write(`${label} ${typeof detail === "string" ? detail : JSON.stringify(detail)}\n`);
@@ -122,11 +128,11 @@ await acp
       log("INITIALIZE", init.agentInfo);
       let sessionId: string;
       if (values.fork) {
-        const forked = await ctx.request("session/fork", { sessionId: values.fork, cwd: values.cwd!, mcpServers: [] });
+        const forked = await ctx.request("session/fork", { sessionId: values.fork, cwd: values.cwd!, mcpServers: [], ...herdrMeta() });
         sessionId = forked.sessionId;
         log("FORKED", { from: values.fork, sessionId });
       } else if (values.resume) {
-        const resumed = await ctx.request("session/resume", { sessionId: values.resume, cwd: values.cwd!, mcpServers: [] });
+        const resumed = await ctx.request("session/resume", { sessionId: values.resume, cwd: values.cwd!, mcpServers: [], ...herdrMeta() });
         sessionId = values.resume;
         log("RESUMED", summarize(resumed.configOptions));
       } else if (values.load) {
@@ -134,7 +140,7 @@ await acp
           sessionId: values.load,
           cwd: values.cwd!,
           mcpServers: [],
-          ...(values.takeover ? { _meta: { herdr: { takeover: true } } } : {}),
+          ...herdrMeta(values.takeover ? { takeover: true } : {}),
         });
         sessionId = values.load;
         log("LOADED", loaded);
@@ -142,7 +148,7 @@ await acp
         const created = await ctx.request("session/new", {
           cwd: values.cwd!,
           mcpServers: [],
-          ...(values["initial-config"] ? { _meta: { herdr: { config: JSON.parse(values["initial-config"]) } } } : {}),
+          ...herdrMeta(values["initial-config"] ? { config: JSON.parse(values["initial-config"]) } : {}),
         });
         sessionId = created.sessionId;
         log("NEW", {

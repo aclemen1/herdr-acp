@@ -57,6 +57,7 @@ Paperclip starts a new herdr-acp for every run and resumes the conversation with
 | `--herdr-session <name>` | `HERDR_ACP_HERDR_SESSION` | Named herdr session |
 | `--machine <label>` | `HERDR_ACP_MACHINE` | Saved herdr SSH machine |
 | `--trust-folders` | `HERDR_ACP_TRUST_FOLDERS=1` | Accept the folder trust question when the client cannot be asked |
+| `--interaction <client\|native>` | `HERDR_ACP_INTERACTION` | Default interaction of new sessions (see `interaction` below) |
 | `--close-panes-on-exit` | `HERDR_ACP_CLOSE_PANES_ON_EXIT=1` | Also close the tabs herdr-acp created when it exits. `session/close` always closes them |
 | `--forward-env <list>` | `HERDR_ACP_FORWARD_ENV` | Variables forwarded even when protected (e.g. `ANTHROPIC_API_KEY`) |
 | `--exclude-env <list>` | `HERDR_ACP_EXCLUDE_ENV` | Extra variables kept out of panes (`NAME*` matches a prefix) |
@@ -94,6 +95,7 @@ A session can also be loaded while it is running in a herdr pane you started you
 | `sessionConfig` | request `_meta` of `session/new` | `{ herdr: { config: { mode?, model?, effort? } } }`, values from the session's config options; applied at launch; an unknown key or value fails with `-32602` before any tab is created |
 | `permissionSuggestions` (Claude) | `_meta` of the `allow_always` permission option | `{ herdr: { suggestions: [{ ...Claude suggestion, destination, originalDestination?, path }] } }`; `userSettings` is always redirected to `localSettings` |
 | `sessionOwnership` | request `_meta` of `session/load`, `resume` | one herdr-acp process owns a session at a time. Loading a session held by another live process fails with `-32010`, unless `{ herdr: { takeover: true } }` is passed; the former owner's next prompt then fails with `-32010` too |
+| `interaction` | request `_meta` of `session/new`, `load`, `resume`, `fork`; response `_meta.herdr.interaction` | `{ herdr: { interaction: "client" \| "native" } }`. `client` (default): questions and permissions go to the ACP client. `native`: they stay in the agent's TUI, AskUserQuestion is never disabled, and `ExitPlanMode` uses the TUI's own dialog. Remembered per session across relaunches; an unknown value fails with `-32602` |
 | `rateLimits` (Claude) | `_meta` of `session/prompt` responses | `{ herdr: { rateLimits } }`, as reported by Claude's status line |
 
 `_session/steering` is announced separately as `_meta.steering.supported`.
@@ -101,7 +103,7 @@ A session can also be loaded while it is running in a herdr pane you started you
 ## How it works
 
 - **Placement**: each session gets a tab in the herdr workspace `acp`, created with the session's cwd and environment. The agent is started with `herdr agent start`.
-- **Teardown**: on `session/close` or when herdr-acp exits (end of stdin, SIGINT, SIGTERM, SIGHUP), the agent is asked to exit (`/exit`, `/quit` for Pi; up to 5 s) and the tab herdr-acp created is closed. A pane you started yourself and attached with `session/load` is never closed.
+- **Teardown**: on `session/close`, the agent is asked to exit (`/exit`, `/quit` for Pi; up to 5 s) and the tab herdr-acp created is closed. When herdr-acp exits (end of stdin, SIGINT, SIGTERM, SIGHUP), the agent keeps running in its tab, ready for a later `session/load`; `--close-panes-on-exit` closes the tabs it created at exit too. A pane you started yourself and attached with `session/load` is never closed.
 - **Pane records**: herdr-acp remembers which pane it launched for each session (`~/.local/state/herdr-acp/panes/`). A later `session/load` or `session/resume`, even from a new herdr-acp process, reuses that pane: it reattaches to the running agent, or relaunches it with `--resume` if only the shell is left. A new tab is opened only when the pane is gone.
 - **Prompts** are typed into the TUI with `herdr agent prompt`, exactly as you would.
 - **Transcript**: herdr-acp tails the agent's JSONL session file and turns messages, tool calls and results into `session/update` notifications.

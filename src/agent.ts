@@ -8,12 +8,22 @@ import {
   type SessionConfig,
   type SteerOutcome,
 } from "./session.ts";
+import { type Interaction, isInteraction } from "./session-prefs.ts";
 
 type SteerParams = {
   sessionId: string;
   prompt: acp.ContentBlock[];
   _meta?: { steering?: { idleBehavior?: string } };
 };
+
+function parseInteraction(meta: unknown): Interaction | undefined {
+  const raw = (meta as { herdr?: { interaction?: unknown } } | null | undefined)?.herdr?.interaction;
+  if (raw === undefined || raw === null) return undefined;
+  if (!isInteraction(raw)) {
+    throw RequestError.invalidParams({ interaction: raw }, `unsupported interaction: ${String(raw)} (supported: client, native)`);
+  }
+  return raw;
+}
 
 function parseInitialConfig(meta: unknown): InitialConfig | undefined {
   const raw = (meta as { herdr?: { config?: unknown } } | null | undefined)?.herdr?.config;
@@ -65,7 +75,12 @@ export function createAgent(config: SessionConfig, version: string) {
     const existing = sessions.get(params.sessionId);
     if (existing) return existing;
     const takeover = (params._meta as { herdr?: { takeover?: unknown } } | null | undefined)?.herdr?.takeover === true;
-    const session = await Session.load(config, { ...params, mcpServers: params.mcpServers ?? [], takeover }, ctx);
+    const interaction = parseInteraction(params._meta);
+    const session = await Session.load(
+      config,
+      { ...params, mcpServers: params.mcpServers ?? [], takeover, ...(interaction ? { interaction } : {}) },
+      ctx,
+    );
     if (!session) throw RequestError.resourceNotFound(params.sessionId);
     sessions.set(session.sessionId, session);
     return session;
@@ -74,7 +89,7 @@ export function createAgent(config: SessionConfig, version: string) {
   const describe = (session: Session) => ({
     modes: session.modeState,
     configOptions: session.configOptions,
-    _meta: { herdr: { paneId: session.pane, tabId: session.tab, ownsTab: session.ownsTab } },
+    _meta: { herdr: { paneId: session.pane, tabId: session.tab, ownsTab: session.ownsTab, interaction: session.interaction() } },
   });
 
   const app = acp
@@ -97,7 +112,13 @@ export function createAgent(config: SessionConfig, version: string) {
           herdr: {
             version,
             agent: config.driver.kind,
-            extensions: { sessionPlacement: 1, sessionConfig: 1, sessionOwnership: 1, ...config.driver.extensions },
+            extensions: {
+              sessionPlacement: 1,
+              sessionConfig: 1,
+              sessionOwnership: 1,
+              interaction: 1,
+              ...config.driver.extensions,
+            },
           },
         },
       };
@@ -105,7 +126,12 @@ export function createAgent(config: SessionConfig, version: string) {
     .onRequest("authenticate", () => ({}))
     .onRequest("session/new", async ({ params, client, requestId }) => {
       const initial = parseInitialConfig(params._meta);
-      const session = await Session.create(config, { ...params, ...(initial ? { initial } : {}) }, { client, requestId });
+      const interaction = parseInteraction(params._meta);
+      const session = await Session.create(
+        config,
+        { ...params, ...(initial ? { initial } : {}), ...(interaction ? { interaction } : {}) },
+        { client, requestId },
+      );
       sessions.set(session.sessionId, session);
       return { sessionId: session.sessionId, ...describe(session) };
     })
@@ -120,7 +146,12 @@ export function createAgent(config: SessionConfig, version: string) {
       return describe(session);
     })
     .onRequest("session/fork", async ({ params, client, requestId }) => {
-      const session = await Session.fork(config, { ...params, mcpServers: params.mcpServers ?? [] }, { client, requestId });
+      const interaction = parseInteraction(params._meta);
+      const session = await Session.fork(
+        config,
+        { ...params, mcpServers: params.mcpServers ?? [], ...(interaction ? { interaction } : {}) },
+        { client, requestId },
+      );
       if (!session) throw RequestError.resourceNotFound(params.sessionId);
       sessions.set(session.sessionId, session);
       await session.announceCommands();

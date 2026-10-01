@@ -98,11 +98,13 @@ export function createClaudeHookHandler(host: HookHost): HookHandler {
             ...(content ? { content } : {}),
           });
         }
+        if (host.interaction() === "native") return null;
         if (name === "AskUserQuestion") return answerQuestions(host, input.tool_input ?? {}, id);
         if (name === "ExitPlanMode") return decideExitPlan(host, input, id);
         return null;
       }
       case "PermissionRequest":
+        if (host.interaction() === "native") return null;
         return decidePermission(host, input, announced.get(toolKey(input.tool_name ?? "tool", input.tool_input)));
       default:
         return null;

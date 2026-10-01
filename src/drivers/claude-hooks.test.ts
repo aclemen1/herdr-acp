@@ -21,7 +21,13 @@ type FakeHost = HookHost & {
 };
 
 function fakeHost(
-  opts: { elicit?: CreateElicitationResponse | null; permission?: (string | null)[]; pending?: string; cwd?: string } = {},
+  opts: {
+    elicit?: CreateElicitationResponse | null;
+    permission?: (string | null)[];
+    pending?: string;
+    cwd?: string;
+    interaction?: "client" | "native";
+  } = {},
 ): FakeHost {
   const choices = [...(opts.permission ?? [])];
   const host: FakeHost = {
@@ -38,6 +44,7 @@ function fakeHost(
     statuses: [],
     optionMeta: [],
     currentMode: () => "default",
+    interaction: () => opts.interaction ?? "client",
     endTurn: () => {},
     envApplied: () => {},
     continueWithMode: (modeId, prompt) => {
@@ -310,4 +317,14 @@ test("labels always-allow options with the suggested rules", () => {
     "Always allow Bash(npm test:*), Read",
   );
   assert.equal(alwaysAllowLabel([{ type: "setMode" }]), "Always allow");
+});
+
+test("native interaction leaves questions, plan approval and permissions to the TUI", async () => {
+  const host = fakeHost({ interaction: "native", elicit: { action: "accept", content: {} }, permission: ["allow"] });
+  const handle = createClaudeHookHandler(host);
+  assert.equal(await handle(ask([color])), null);
+  assert.equal(await handle({ hook_event_name: "PreToolUse", tool_name: "ExitPlanMode", tool_use_id: "tp", tool_input: { plan: "p" } }), null);
+  assert.equal(await handle({ hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "node x" } }), null);
+  assert.deepEqual(host.permissions, []);
+  assert.equal(host.updates.filter((update) => update.sessionUpdate === "tool_call").length, 2);
 });

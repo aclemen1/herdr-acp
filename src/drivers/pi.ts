@@ -524,7 +524,7 @@ async function decidePiTool(host: HookHost, input: PiHookInput) {
     ...(content ? { content } : {}),
   };
   await host.notify({ sessionUpdate: "tool_call", ...toolCall });
-  if (host.currentMode() !== "ask") return null;
+  if (host.currentMode() !== "ask" || host.interaction() === "native") return null;
   const choice = await host.requestPermission(toolCall, [
     { optionId: "allow", name: "Allow", kind: "allow_once" },
     { optionId: "reject", name: "Reject", kind: "reject_once" },

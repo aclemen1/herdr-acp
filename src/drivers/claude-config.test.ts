@@ -51,6 +51,8 @@ test("builds launch arguments with status line wrapper, settings and restriction
       hookCommand: "hook",
       statusLineCommand: "wrap",
       clientCanElicit: false,
+      trustApproved: false,
+      interaction: "client",
       mode: "plan",
       effort: "max",
     });
@@ -118,7 +120,28 @@ test("forks a stored session under a new id", async () => {
       hookCommand: "hook",
       statusLineCommand: "wrap",
       clientCanElicit: true,
+      trustApproved: false,
+      interaction: "client",
     });
     assert.deepEqual(args.slice(0, 5), ["--resume", "old-id", "--fork-session", "--session-id", "new-id"]);
+  });
+});
+
+test("never disables AskUserQuestion in native interaction", async () => {
+  await withConfigDir({}, async () => {
+    const args = await new ClaudeDriver().launchArgs({
+      sessionId: "s",
+      resume: false,
+      cwd: "/tmp",
+      mcpServers: [],
+      stateDir: tmpdir(),
+      extraArgs: [],
+      hookCommand: "hook",
+      statusLineCommand: "wrap",
+      clientCanElicit: false,
+      trustApproved: false,
+      interaction: "native",
+    });
+    assert.equal(args.includes("--disallowedTools"), false);
   });
 });
