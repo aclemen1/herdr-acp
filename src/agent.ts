@@ -16,6 +16,20 @@ type SteerParams = {
   _meta?: { steering?: { idleBehavior?: string } };
 };
 
+const MAX_TAB_LABEL = 200;
+
+function parseTabLabel(meta: unknown): string | undefined {
+  const raw = (meta as { herdr?: { tabLabel?: unknown } } | null | undefined)?.herdr?.tabLabel;
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string" || !raw.trim() || raw.length > MAX_TAB_LABEL || /[\r\n]/.test(raw)) {
+    throw RequestError.invalidParams(
+      { tabLabel: raw },
+      `_meta.herdr.tabLabel must be a non-empty single-line string of at most ${MAX_TAB_LABEL} characters`,
+    );
+  }
+  return raw;
+}
+
 function parseInteraction(meta: unknown): Interaction | undefined {
   const raw = (meta as { herdr?: { interaction?: unknown } } | null | undefined)?.herdr?.interaction;
   if (raw === undefined || raw === null) return undefined;
@@ -76,9 +90,16 @@ export function createAgent(config: SessionConfig, version: string) {
     if (existing) return existing;
     const takeover = (params._meta as { herdr?: { takeover?: unknown } } | null | undefined)?.herdr?.takeover === true;
     const interaction = parseInteraction(params._meta);
+    const tabLabel = parseTabLabel(params._meta);
     const session = await Session.load(
       config,
-      { ...params, mcpServers: params.mcpServers ?? [], takeover, ...(interaction ? { interaction } : {}) },
+      {
+        ...params,
+        mcpServers: params.mcpServers ?? [],
+        takeover,
+        ...(interaction ? { interaction } : {}),
+        ...(tabLabel ? { tabLabel } : {}),
+      },
       ctx,
     );
     if (!session) throw RequestError.resourceNotFound(params.sessionId);
@@ -117,6 +138,7 @@ export function createAgent(config: SessionConfig, version: string) {
               sessionConfig: 1,
               sessionOwnership: 1,
               interaction: 1,
+              tabLabel: 1,
               ...config.driver.extensions,
             },
           },
@@ -127,9 +149,15 @@ export function createAgent(config: SessionConfig, version: string) {
     .onRequest("session/new", async ({ params, client, requestId }) => {
       const initial = parseInitialConfig(params._meta);
       const interaction = parseInteraction(params._meta);
+      const tabLabel = parseTabLabel(params._meta);
       const session = await Session.create(
         config,
-        { ...params, ...(initial ? { initial } : {}), ...(interaction ? { interaction } : {}) },
+        {
+          ...params,
+          ...(initial ? { initial } : {}),
+          ...(interaction ? { interaction } : {}),
+          ...(tabLabel ? { tabLabel } : {}),
+        },
         { client, requestId },
       );
       sessions.set(session.sessionId, session);
@@ -147,9 +175,15 @@ export function createAgent(config: SessionConfig, version: string) {
     })
     .onRequest("session/fork", async ({ params, client, requestId }) => {
       const interaction = parseInteraction(params._meta);
+      const tabLabel = parseTabLabel(params._meta);
       const session = await Session.fork(
         config,
-        { ...params, mcpServers: params.mcpServers ?? [], ...(interaction ? { interaction } : {}) },
+        {
+          ...params,
+          mcpServers: params.mcpServers ?? [],
+          ...(interaction ? { interaction } : {}),
+          ...(tabLabel ? { tabLabel } : {}),
+        },
         { client, requestId },
       );
       if (!session) throw RequestError.resourceNotFound(params.sessionId);

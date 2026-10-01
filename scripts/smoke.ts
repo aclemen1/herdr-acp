@@ -24,6 +24,7 @@ const { values, positionals } = parseArgs({
     "initial-config": { type: "string" },
     takeover: { type: "boolean", default: false },
     interaction: { type: "string" },
+    "tab-label": { type: "string" },
     pause: { type: "string" },
     config: { type: "string", multiple: true },
     resume: { type: "string" },
@@ -51,7 +52,11 @@ const summarize = (options: acp.SessionConfigOption[] | null | undefined) =>
   Object.fromEntries((options ?? []).map((option) => [option.id, option.type === "select" ? option.currentValue : option.currentValue]));
 
 const herdrMeta = (extra: Record<string, unknown> = {}) => {
-  const herdr = { ...extra, ...(values.interaction ? { interaction: values.interaction } : {}) };
+  const herdr = {
+    ...extra,
+    ...(values.interaction ? { interaction: values.interaction } : {}),
+    ...(values["tab-label"] ? { tabLabel: values["tab-label"] } : {}),
+  };
   return Object.keys(herdr).length > 0 ? { _meta: { herdr } } : {};
 };
 

@@ -178,7 +178,7 @@ export class Session implements HookHost {
 
   static async create(
     config: SessionConfig,
-    params: { cwd: string; mcpServers: McpServer[]; initial?: InitialConfig; interaction?: Interaction },
+    params: { cwd: string; mcpServers: McpServer[]; initial?: InitialConfig; interaction?: Interaction; tabLabel?: string },
     ctx: RequestContext,
   ): Promise<Session> {
     const interaction = params.interaction ?? config.defaultInteraction;
@@ -188,7 +188,7 @@ export class Session implements HookHost {
     const id = config.driver.newSessionId();
     const owner = await acquireOwnership(config.stateDir, id, false);
     await writeSessionPrefs(config.stateDir, id, { interaction });
-    const placement = await placePane(config, id, params.cwd);
+    const placement = await placePane(config, id, params.cwd, params.tabLabel);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
       settings: { ...settings, ...initial },
       mcpServers: params.mcpServers,
@@ -211,7 +211,7 @@ export class Session implements HookHost {
 
   static async fork(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction?: Interaction },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction?: Interaction; tabLabel?: string },
     ctx: RequestContext,
   ): Promise<Session | null> {
     if (!(await config.driver.transcriptExists(params.sessionId))) return null;
@@ -221,7 +221,7 @@ export class Session implements HookHost {
     const id = config.driver.newSessionId();
     const owner = await acquireOwnership(config.stateDir, id, false);
     await writeSessionPrefs(config.stateDir, id, { interaction });
-    const placement = await placePane(config, id, params.cwd);
+    const placement = await placePane(config, id, params.cwd, params.tabLabel);
     const settings = await config.driver.initialSettings(config.extraArgs);
     const session = new Session(config, ctx.client, id, params.cwd, placement, {
       settings,
@@ -245,7 +245,7 @@ export class Session implements HookHost {
   // Reuses the pane herdr-acp itself launched for this session, found through its own pane record.
   private static async reattach(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction; tabLabel?: string },
     ctx: RequestContext,
     settings: SessionSettings,
   ): Promise<Session | null> {
@@ -272,6 +272,7 @@ export class Session implements HookHost {
       { settings, mcpServers: params.mcpServers, canRestart: true, interaction: params.interaction },
     );
     await session.listenHooks();
+    if (params.tabLabel) await config.herdr.renameTab(pane.tab_id, params.tabLabel);
     if (running) {
       if ((await session.writeEnvFile()) && config.driver.envAcknowledged) await session.waitForEnv();
       return session;
@@ -289,7 +290,14 @@ export class Session implements HookHost {
 
   static async load(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; takeover?: boolean; interaction?: Interaction },
+    params: {
+      sessionId: string;
+      cwd: string;
+      mcpServers: McpServer[];
+      takeover?: boolean;
+      interaction?: Interaction;
+      tabLabel?: string;
+    },
     ctx: RequestContext,
   ): Promise<Session | null> {
     const owner = await acquireOwnership(config.stateDir, params.sessionId, params.takeover === true);
@@ -309,7 +317,7 @@ export class Session implements HookHost {
 
   private static async attach(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction; tabLabel?: string },
     ctx: RequestContext,
   ): Promise<Session | null> {
     const settings = await config.driver.initialSettings(config.extraArgs);
@@ -332,7 +340,7 @@ export class Session implements HookHost {
     }
     if (!(await config.driver.transcriptExists(params.sessionId))) return null;
     const trusted = await ensureTrust(config, params.cwd, ctx);
-    const placement = await placePane(config, params.sessionId, params.cwd);
+    const placement = await placePane(config, params.sessionId, params.cwd, params.tabLabel);
     const session = new Session(config, ctx.client, params.sessionId, params.cwd, placement, {
       settings,
       mcpServers: params.mcpServers,
@@ -961,7 +969,7 @@ function liveSessionId(config: SessionConfig, agent: AgentInfo): string | null {
   return config.driver.sessionIdFromRef(agent.agent_session);
 }
 
-function placePane(config: SessionConfig, sessionId: string, cwd: string): Promise<Placement> {
+function placePane(config: SessionConfig, sessionId: string, cwd: string, tabLabel?: string): Promise<Placement> {
   return serialized(async () => {
     const { herdr, workspaceLabel } = config;
     const env = {
@@ -969,10 +977,11 @@ function placePane(config: SessionConfig, sessionId: string, cwd: string): Promi
       HERDR_ACP_SOCKET: socketPath(config.stateDir, sessionId),
       HERDR_ACP_ENV_FILE: envFilePath(config.stateDir, sessionId),
     };
-    const label = `${config.driver.kind} ${sessionId.slice(0, 8)}`;
+    const label = tabLabel ?? `${config.driver.kind} ${sessionId.slice(0, 8)}`;
     const workspace = (await herdr.listWorkspaces()).find((ws) => ws.label === workspaceLabel);
     if (!workspace) {
       const created = await herdr.createWorkspace({ label: workspaceLabel, cwd, env });
+      await herdr.renameTab(created.tab.tab_id, label);
       return { paneId: created.root_pane.pane_id, tabId: created.tab.tab_id };
     }
     const created = await herdr.createTab({ workspaceId: workspace.workspace_id, label, cwd, env });

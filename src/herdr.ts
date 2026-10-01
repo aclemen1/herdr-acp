@@ -84,6 +84,10 @@ export class Herdr {
     ]);
   }
 
+  async renameTab(tabId: string, label: string): Promise<void> {
+    await this.call(["tab", "rename", tabId, label]);
+  }
+
   async closeTab(tabId: string): Promise<void> {
     await this.call(["tab", "close", tabId]);
   }
