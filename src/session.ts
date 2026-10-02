@@ -27,7 +27,7 @@ import { JsonlTail } from "./jsonl-tail.ts";
 import { type Interaction, readSessionPrefs, writeSessionPrefs } from "./session-prefs.ts";
 import { acquireOwnership, checkOwnership, type Owner, releaseOwnership } from "./ownership.ts";
 import { deletePaneRecord, listPaneRecords, readPaneRecord, writePaneRecord } from "./pane-records.ts";
-import { releasePane, stopAgent } from "./pane-release.ts";
+import { planReattach, releasePane, stopAgent } from "./pane-release.ts";
 import { promptToText } from "./prompt.ts";
 
 export type SessionConfig = {
@@ -48,7 +48,9 @@ export type SessionConfig = {
 
 export type RequestContext = { client: AgentContext; requestId: string | number | null };
 
-type Placement = { paneId: string; tabId: string | null; observedTabId?: string };
+// tabId: the tab herdr-acp owns now; createdTabId: the tab it created for this pane, even if the
+// pane has since been moved out of it (the pane then still belongs to herdr-acp, the tab does not).
+type Placement = { paneId: string; tabId: string | null; observedTabId?: string; createdTabId?: string };
 type Turn = {
   cancelled: boolean;
   streamed: string;
@@ -98,6 +100,7 @@ export class Session implements HookHost {
   private paneId: string;
   private readonly ownedTabId: string | null;
   private readonly observedTabId: string | null;
+  private readonly createdTabId: string | null;
   private readonly config: SessionConfig;
   private readonly client: AgentContext;
   private readonly parser: TranscriptParser;
@@ -147,6 +150,7 @@ export class Session implements HookHost {
     this.paneId = placement.paneId;
     this.ownedTabId = placement.tabId;
     this.observedTabId = placement.observedTabId ?? null;
+    this.createdTabId = placement.createdTabId ?? placement.tabId;
     this.parser = config.driver.createParser();
     this.modes = config.driver.availableModes(config.extraArgs);
     this.settings = { ...init.settings };
@@ -251,12 +255,14 @@ export class Session implements HookHost {
   ): Promise<Session | null> {
     const record = await readPaneRecord(config.stateDir, params.sessionId);
     if (!record || record.kind !== config.driver.kind || record.target !== config.herdr.target) return null;
-    const pane = await config.herdr.getPane(record.paneId);
-    if (!pane) {
+    const plan = await planReattach(config.herdr, record);
+    if (!plan) {
       await deletePaneRecord(config.stateDir, params.sessionId);
       return null;
     }
-    const agent = await config.herdr.getAgent(record.paneId).catch(() => null);
+    const { pane, owned } = plan;
+    if (plan.renamedId) await writePaneRecord(config.stateDir, { ...record, paneId: pane.pane_id });
+    const agent = await config.herdr.getAgent(pane.pane_id).catch(() => null);
     const ref = agent?.agent_session ? config.driver.sessionIdFromRef(agent.agent_session) : null;
     const running = agent?.agent === config.driver.kind && (ref === null || ref === params.sessionId);
     if (agent?.agent && !running) {
@@ -268,11 +274,13 @@ export class Session implements HookHost {
       ctx.client,
       params.sessionId,
       record.cwd,
-      { paneId: record.paneId, tabId: pane.tab_id },
+      owned
+        ? { paneId: pane.pane_id, tabId: pane.tab_id }
+        : { paneId: pane.pane_id, tabId: null, observedTabId: pane.tab_id, createdTabId: record.tabId },
       { settings, mcpServers: params.mcpServers, canRestart: true, interaction: params.interaction },
     );
     await session.listenHooks();
-    if (params.tabLabel) await config.herdr.renameTab(pane.tab_id, params.tabLabel);
+    if (owned && params.tabLabel) await config.herdr.renameTab(pane.tab_id, params.tabLabel);
     if (running) {
       if ((await session.writeEnvFile()) && config.driver.envAcknowledged) await session.waitForEnv();
       return session;
@@ -424,6 +432,7 @@ export class Session implements HookHost {
   private async runPrompt(blocks: ContentBlock[]): Promise<PromptResponse> {
     const text = await this.promptText(blocks);
     await this.restarting;
+    await this.refreshPaneId();
     const turn: Turn = {
       cancelled: false,
       streamed: "",
@@ -555,6 +564,7 @@ export class Session implements HookHost {
 
   private async restartWith(change: LaunchChange): Promise<void> {
     const { herdr, driver } = this.config;
+    await this.refreshPaneId();
     if (!(await stopAgent(herdr, driver, this.paneId, { pollMs: this.config.pollMs, timeoutMs: 15_000 }))) {
       throw new Error(`${driver.title} did not exit in herdr pane ${this.paneId}`);
     }
@@ -587,17 +597,25 @@ export class Session implements HookHost {
     await this.releaseOwnedTab();
   }
 
-  // Process exit: a tab herdr-acp created goes away with it; a pane attached by session/load stays untouched.
+  // Process exit keeps the agent running unless --close-panes-on-exit; a pane started by hand is never closed.
   async shutdown(): Promise<void> {
-    if (!this.ownedTabId || !this.config.closePanesOnExit) return this.dispose();
+    if (!this.createdTabId || !this.config.closePanesOnExit) return this.dispose();
     await this.close();
   }
 
   private async releaseOwnedTab(): Promise<void> {
-    if (!this.ownedTabId) return;
+    if (!this.createdTabId) return;
     const { herdr, driver, pollMs } = this.config;
-    await releasePane(herdr, driver, { paneId: this.paneId, tabId: this.ownedTabId }, { pollMs, timeoutMs: EXIT_WAIT_MS });
+    await releasePane(herdr, driver, { paneId: this.paneId, ownedTabId: this.ownedTabId }, { pollMs, timeoutMs: EXIT_WAIT_MS });
     await deletePaneRecord(this.config.stateDir, this.sessionId);
+  }
+
+  // A pane moved to another workspace gets a new id; herdr still resolves the old one.
+  private async refreshPaneId(): Promise<void> {
+    const pane = await this.config.herdr.getPane(this.paneId).catch(() => null);
+    if (!pane || pane.pane_id === this.paneId) return;
+    this.paneId = pane.pane_id;
+    await this.recordPane();
   }
 
   async dispose(): Promise<void> {
@@ -748,13 +766,13 @@ export class Session implements HookHost {
   }
 
   private async recordPane(): Promise<void> {
-    if (!this.ownedTabId) return;
+    if (!this.createdTabId) return;
     await writePaneRecord(this.config.stateDir, {
       sessionId: this.sessionId,
       kind: this.config.driver.kind,
       target: this.config.herdr.target,
       paneId: this.paneId,
-      tabId: this.ownedTabId,
+      tabId: this.createdTabId,
       cwd: this.cwd,
     });
   }

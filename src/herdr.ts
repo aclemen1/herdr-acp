@@ -23,7 +23,7 @@ export type AgentInfo = {
 };
 
 export type PaneInfo = { pane_id: string; tab_id: string; workspace_id: string };
-export type TabInfo = { tab_id: string; workspace_id: string; label: string };
+export type TabInfo = { tab_id: string; workspace_id: string; label: string; pane_count?: number };
 export type WorkspaceInfo = { workspace_id: string; label: string };
 
 export class HerdrError extends Error {
@@ -86,6 +86,19 @@ export class Herdr {
 
   async renameTab(tabId: string, label: string): Promise<void> {
     await this.call(["tab", "rename", tabId, label]);
+  }
+
+  async getTab(tabId: string): Promise<TabInfo | null> {
+    try {
+      return (await this.call<{ tab: TabInfo }>(["tab", "get", tabId])).tab;
+    } catch (error) {
+      if (error instanceof HerdrError) return null;
+      throw error;
+    }
+  }
+
+  async closePane(paneId: string): Promise<void> {
+    await this.call(["pane", "close", paneId]);
   }
 
   async closeTab(tabId: string): Promise<void> {
