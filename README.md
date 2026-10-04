@@ -54,7 +54,7 @@ Paperclip starts a new herdr-acp for every run and resumes the conversation with
 |---|---|---|
 | `--agent <claude\|pi>` | `HERDR_ACP_AGENT` | Agent to run (default `claude`) |
 | `--workspace <label>` | `HERDR_ACP_WORKSPACE` | herdr workspace that hosts session tabs (default `acp`) |
-| `--herdr-session <name>` | `HERDR_ACP_HERDR_SESSION` | Named herdr session |
+| `--herdr-session <name>` | `HERDR_ACP_HERDR_SESSION` | Named herdr session. If its server is not running (local machine only), herdr-acp starts it headless with `herdr --session <name> server`; it keeps running after herdr-acp exits. Sessions then run without any visible tab; watch them with `herdr session attach <name>` |
 | `--machine <label>` | `HERDR_ACP_MACHINE` | Saved herdr SSH machine |
 | `--trust-folders` | `HERDR_ACP_TRUST_FOLDERS=1` | Accept the folder trust question when the client cannot be asked |
 | `--interaction <client\|native>` | `HERDR_ACP_INTERACTION` | Default interaction of new sessions (see `interaction` below) |

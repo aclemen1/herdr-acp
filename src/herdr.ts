@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
@@ -39,7 +40,10 @@ export type HerdrOptions = {
   bin?: string;
   session?: string;
   machine?: string;
+  serverStartTimeoutMs?: number;
 };
+
+const SERVER_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|LANG|LC_\w+)$/;
 
 type Envelope<T> = { result?: T; error?: { code: string; message: string } };
 
@@ -47,6 +51,9 @@ export class Herdr {
   private readonly bin: string;
   private readonly globalArgs: string[];
   readonly target: string;
+  private readonly startsServer: boolean;
+  private readonly serverStartTimeoutMs: number;
+  private serverStart: Promise<void> | null = null;
 
   constructor(options: HerdrOptions = {}) {
     this.bin = options.bin ?? "herdr";
@@ -55,9 +62,38 @@ export class Herdr {
       ...(options.session ? ["--session", options.session] : []),
       ...(options.machine ? ["--machine", options.machine] : []),
     ];
+    this.startsServer = Boolean(options.session) && !options.machine;
+    this.serverStartTimeoutMs = options.serverStartTimeoutMs ?? 10_000;
   }
 
   async call<T>(args: string[]): Promise<T> {
+    try {
+      return await this.callOnce<T>(args);
+    } catch (error) {
+      if (!this.startsServer || !isServerNotRunning(error)) throw error;
+      await (this.serverStart ??= this.startServer().finally(() => (this.serverStart = null)));
+      return this.callOnce<T>(args);
+    }
+  }
+
+  private async startServer(): Promise<void> {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => SERVER_ENV.test(key)));
+    const child = spawn(this.bin, [...this.globalArgs, "server"], { detached: true, stdio: "ignore", env });
+    child.once("error", () => {});
+    child.unref();
+    const deadline = Date.now() + this.serverStartTimeoutMs;
+    for (;;) {
+      try {
+        await this.callOnce(["workspace", "list"]);
+        return;
+      } catch (error) {
+        if (!isServerNotRunning(error) || Date.now() > deadline) throw error;
+        await sleep(200);
+      }
+    }
+  }
+
+  private async callOnce<T>(args: string[]): Promise<T> {
     const { stdout, stderr, code } = await run(this.bin, [...this.globalArgs, ...args]);
     const envelope = parseEnvelope<T>(code === 0 ? stdout : stderr || stdout);
     if (envelope?.error) throw new HerdrError(envelope.error.code, envelope.error.message);
@@ -138,6 +174,10 @@ export class Herdr {
   async sendKeys(target: string, keys: string[]): Promise<void> {
     await this.call(["agent", "send-keys", target, ...keys]);
   }
+}
+
+function isServerNotRunning(error: unknown): boolean {
+  return error instanceof HerdrError && error.code === "server_not_running";
 }
 
 function envArgs(env: Record<string, string>): string[] {
