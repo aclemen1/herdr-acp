@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { McpServer, PlanEntry, SessionMode, SessionUpdate } from "@agentclientprotocol/sdk";
 import { argValue, claudeConfigOptions, claudeInitialModel, readUserSettings, withoutArg } from "./claude-config.ts";
 import { claudeHookSettings, createClaudeHookHandler } from "./claude-hooks.ts";
+import { deliverToInbox, isQueuedPrompt, peerMessageBody } from "./claude-messaging.ts";
 import { claudeInitialMode, claudeModes } from "./claude-modes.ts";
 import { claudeUserSettingsPath, hasGlobalHerdrAcpHooks, installGlobalHooks, uninstallGlobalHooks } from "./claude-settings.ts";
 import { toolContent, toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
@@ -70,11 +71,19 @@ export class ClaudeDriver implements Driver {
 
   readonly exitCommand = "/exit";
   readonly modeRequiresRestart = true;
-  readonly extensions = { permissionSuggestions: 1, rateLimits: 1 };
+  readonly extensions = { permissionSuggestions: 1, rateLimits: 1, delivery: 1 };
   readonly envAcknowledged = true;
 
   replayOrder(records: unknown[]): unknown[] {
     return records;
+  }
+
+  deliverQueued(sessionId: string, text: string): Promise<boolean> {
+    return deliverToInbox(sessionId, text);
+  }
+
+  confirmsQueued(record: unknown, text: string): boolean {
+    return isQueuedPrompt(record, text);
   }
   readonly protectedEnv = /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDECODE|CLAUDE_CODE_\w*|CLAUDE_PID|CLAUDE_EFFORT)$/;
 
@@ -249,6 +258,7 @@ type Rec = {
   subtype?: string;
   isSidechain?: boolean;
   isMeta?: boolean;
+  origin?: { kind?: string };
   timestamp?: string;
   operation?: string;
   content?: unknown;
@@ -351,7 +361,9 @@ export class ClaudeTranscriptParser implements TranscriptParser {
     const content = record.message?.content;
     const events: DriverEvent[] = [];
     if (typeof content === "string") {
-      if (replay && !record.isMeta && !isInternalText(content)) {
+      if (replay && record.origin?.kind === "peer") {
+        events.push(update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: peerMessageBody(content) } }));
+      } else if (replay && !record.isMeta && !isInternalText(content)) {
         events.push(update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: content } }));
       }
       return events;

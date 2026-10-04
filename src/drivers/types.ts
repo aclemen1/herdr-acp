@@ -109,4 +109,6 @@ export interface Driver {
   readonly extensions: Record<string, number>;
   readonly envAcknowledged: boolean;
   replayOrder(records: unknown[]): unknown[];
+  deliverQueued?(sessionId: string, text: string): Promise<boolean>;
+  confirmsQueued?(record: unknown, text: string): boolean;
 }

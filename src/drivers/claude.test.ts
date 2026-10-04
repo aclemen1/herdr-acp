@@ -61,6 +61,13 @@ test("replays user messages but skips meta and command records", () => {
   assert.equal(parser.parse({ type: "user", message: { content: "Hello" } }, { replay: false }).length, 0);
 });
 
+test("replays a peer message without Claude's frame", () => {
+  const parser = new ClaudeTranscriptParser();
+  const content = "Another Claude session sent a message:\nFrom office\n\nThis came from another Claude session — not typed by your user.";
+  const [event] = parser.parse({ type: "user", isMeta: true, origin: { kind: "peer" }, message: { content } }, { replay: true });
+  assert.deepEqual(event, { type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "From office" } } });
+});
+
 test("ignores sidechain records and converts TodoWrite to a plan", () => {
   const parser = new ClaudeTranscriptParser();
   assert.deepEqual(parser.parse({ ...assistant("s", [{ type: "text", text: "x" }]), isSidechain: true }, { replay: false }), []);

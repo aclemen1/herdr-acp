@@ -42,7 +42,7 @@ function initialize(args: string[]): Promise<Record<string, unknown>> {
 test("announces herdr extensions per agent at initialize", async () => {
   const claude = (await initialize([]))._meta as { herdr: { agent: string; extensions: Record<string, number> } };
   assert.equal(claude.herdr.agent, "claude");
-  assert.deepEqual(Object.keys(claude.herdr.extensions).sort(), ["interaction", "permissionSuggestions", "rateLimits", "sessionConfig", "sessionOwnership", "sessionPlacement", "tabLabel"]);
+  assert.deepEqual(Object.keys(claude.herdr.extensions).sort(), ["delivery", "interaction", "permissionSuggestions", "rateLimits", "sessionConfig", "sessionOwnership", "sessionPlacement", "tabLabel"]);
   const pi = (await initialize(["--agent", "pi"]))._meta as { herdr: { agent: string; extensions: Record<string, number> } };
   assert.equal(pi.herdr.agent, "pi");
   assert.deepEqual(Object.keys(pi.herdr.extensions).sort(), ["interaction", "sessionConfig", "sessionOwnership", "sessionPlacement", "tabLabel"]);
@@ -60,6 +60,20 @@ test("rejects an unknown interaction before creating anything", async () => {
   const error = reply.error as { code: number; message: string };
   assert.equal(error.code, -32602);
   assert.match(error.message, /unsupported interaction: telepathy/);
+});
+
+test("rejects an unknown prompt delivery", async () => {
+  const reply = await exchange(
+    [],
+    [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: {} } },
+      { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "x", prompt: [{ type: "text", text: "hi" }], _meta: { delivery: "later" } } },
+    ],
+    2,
+  );
+  const error = reply.error as { code: number; message: string };
+  assert.equal(error.code, -32602);
+  assert.match(error.message, /unsupported delivery: later/);
 });
 
 test("rejects a multi-line tab label before creating anything", async () => {

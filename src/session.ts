@@ -64,6 +64,7 @@ type Turn = {
 export type SteerOutcome = { outcome: "injected" | "startedNewTurn" | "promptRequired"; reason?: string };
 type LaunchChange = { mode?: string; model?: string; effort?: string };
 export type InitialConfig = { mode?: string; model?: string; effort?: string };
+export type Delivery = "now" | "queue";
 
 const INITIAL_CONFIG_KEYS = ["mode", "model", "effort"] as const;
 
@@ -84,6 +85,7 @@ function validateInitialConfig(config: SessionConfig, settings: SessionSettings,
 const STATUS_WAIT_MS = 3_000;
 const ENV_WAIT_MS = 3_000;
 const EXIT_WAIT_MS = 5_000;
+const QUEUED_CONFIRM_MS = 5_000;
 const ALWAYS_HANDLED_HOOKS = new Set(["StatusLine", "SessionStart", "FileChanged", "CwdChanged"]);
 
 let placementQueue: Promise<unknown> = Promise.resolve();
@@ -394,7 +396,7 @@ export class Session implements HookHost {
     await this.readHistory((update) => this.notify(update));
   }
 
-  async prompt(blocks: ContentBlock[]): Promise<PromptResponse> {
+  async prompt(blocks: ContentBlock[], delivery: Delivery = "now"): Promise<PromptResponse> {
     try {
       if (this.owner) await checkOwnership(this.config.stateDir, this.sessionId, this.owner);
     } catch (error) {
@@ -404,7 +406,7 @@ export class Session implements HookHost {
     }
     const generation = this.cancelGeneration;
     const run = this.promptChain.then(() =>
-      generation === this.cancelGeneration ? this.runPrompt(blocks) : { stopReason: "cancelled" as const },
+      generation === this.cancelGeneration ? this.runPrompt(blocks, delivery) : { stopReason: "cancelled" as const },
     );
     this.promptChain = run.catch(() => undefined);
     return run;
@@ -429,7 +431,7 @@ export class Session implements HookHost {
     return promptToText(blocks, { attachmentDir: join(this.config.stateDir, "attachments") });
   }
 
-  private async runPrompt(blocks: ContentBlock[]): Promise<PromptResponse> {
+  private async runPrompt(blocks: ContentBlock[], delivery: Delivery): Promise<PromptResponse> {
     const text = await this.promptText(blocks);
     await this.restarting;
     await this.refreshPaneId();
@@ -444,7 +446,7 @@ export class Session implements HookHost {
     };
     this.turn = turn;
     try {
-      return await this.runTurn(text, turn);
+      return await this.runTurn(text, turn, delivery);
     } finally {
       this.turn = null;
       const change: LaunchChange = { ...this.pendingConfig };
@@ -800,13 +802,14 @@ export class Session implements HookHost {
     throw new Error(`${driver.title} did not become ready within ${this.config.startTimeoutMs} ms`);
   }
 
-  private async runTurn(text: string, turn: Turn): Promise<PromptResponse> {
+  private async runTurn(text: string, turn: Turn, delivery: Delivery): Promise<PromptResponse> {
     const usage = new Map<string, TokenUsage>();
     const outcome = { stopReason: "end_turn" as StopReason };
     let next: string | null = text;
     while (next !== null) {
-      await this.followPrompt(next, turn, usage, outcome);
+      await this.followPrompt(next, turn, usage, outcome, delivery);
       next = null;
+      delivery = "now";
       const continuation = turn.continuation;
       turn.continuation = null;
       if (continuation && !turn.cancelled) {
@@ -821,11 +824,27 @@ export class Session implements HookHost {
     };
   }
 
+  private async deliverQueued(text: string, tail: JsonlTail, backlog: unknown[]): Promise<boolean> {
+    const { driver, pollMs } = this.config;
+    if (!driver.deliverQueued || !driver.confirmsQueued) return false;
+    if (!(await driver.deliverQueued(this.sessionId, text))) return false;
+    const deadline = Date.now() + QUEUED_CONFIRM_MS;
+    while (Date.now() < deadline) {
+      const records = await tail.readNew();
+      backlog.push(...records);
+      if (records.some((record) => driver.confirmsQueued!(record, text))) return true;
+      await sleep(pollMs);
+    }
+    process.stderr.write(`herdr-acp: ${driver.title} did not confirm the queued prompt; typing it instead\n`);
+    return false;
+  }
+
   private async followPrompt(
     text: string,
     turn: Turn,
     usage: Map<string, TokenUsage>,
     outcome: { stopReason: StopReason },
+    delivery: Delivery,
   ): Promise<void> {
     const { herdr, driver, pollMs, idleSettleMs } = this.config;
     const agent = await herdr.getAgent(this.paneId);
@@ -835,12 +854,13 @@ export class Session implements HookHost {
     let blockedReported = false;
     let quietSince: number | null = null;
     const startedAt = Date.now();
+    const backlog: unknown[] = [];
 
-    await herdr.prompt(this.paneId, text);
+    if (delivery !== "queue" || !(await this.deliverQueued(text, tail, backlog))) await herdr.prompt(this.paneId, text);
 
     for (;;) {
       let turnEnded = false;
-      const records = await tail.readNew();
+      const records = [...backlog.splice(0), ...(await tail.readNew())];
       if (records.length > 0) {
         sawActivity = true;
         quietSince = null;

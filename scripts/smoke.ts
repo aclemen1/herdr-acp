@@ -34,6 +34,7 @@ const { values, positionals } = parseArgs({
     "steer-after": { type: "string", default: "3000" },
     image: { type: "string" },
     list: { type: "boolean", default: false },
+    delivery: { type: "string" },
   },
 });
 
@@ -203,7 +204,11 @@ await acp
         if (values.image) {
           prompt.push({ type: "image", mimeType: "image/png", data: readFileSync(values.image).toString("base64") });
         }
-        const response = await ctx.request("session/prompt", { sessionId, prompt });
+        const response = await ctx.request("session/prompt", {
+          sessionId,
+          prompt,
+          ...(values.delivery ? { _meta: { delivery: values.delivery } } : {}),
+        });
         log("RESPONSE", { ...response, ms: Date.now() - started });
       }
       if (values.queue) await ctx.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Réponds juste FIN." }] });

@@ -1,6 +1,7 @@
 import * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
+  type Delivery,
   type InitialConfig,
   listSessions,
   Session,
@@ -26,6 +27,15 @@ function parseTabLabel(meta: unknown): string | undefined {
       { tabLabel: raw },
       `_meta.herdr.tabLabel must be a non-empty single-line string of at most ${MAX_TAB_LABEL} characters`,
     );
+  }
+  return raw;
+}
+
+function parseDelivery(meta: unknown): Delivery {
+  const raw = (meta as { delivery?: unknown } | null | undefined)?.delivery;
+  if (raw === undefined || raw === null) return "now";
+  if (raw !== "now" && raw !== "queue") {
+    throw RequestError.invalidParams({ delivery: raw }, `unsupported delivery: ${String(raw)} (supported: now, queue)`);
   }
   return raw;
 }
@@ -205,7 +215,10 @@ export function createAgent(config: SessionConfig, version: string) {
       getSession(params.sessionId).steer(params.prompt, params._meta?.steering?.idleBehavior),
     )
     .onRequest("session/list", async ({ params }) => ({ sessions: await listSessions(config, params.cwd) }))
-    .onRequest("session/prompt", async ({ params }) => getSession(params.sessionId).prompt(params.prompt))
+    .onRequest("session/prompt", async ({ params }) => {
+      const delivery = parseDelivery(params._meta);
+      return getSession(params.sessionId).prompt(params.prompt, delivery);
+    })
     .onNotification("session/cancel", async ({ params }) => {
       await sessions.get(params.sessionId)?.cancel();
     })
