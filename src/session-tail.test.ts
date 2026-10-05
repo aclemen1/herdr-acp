@@ -43,6 +43,15 @@ test("returns the last updates and a cursor for the rest", async () => {
   assert.equal(idle.cursor, next.cursor);
 });
 
+test("stamps each update with the time of its transcript line", async () => {
+  const { config, path } = setup();
+  const at = "2026-10-05T13:47:08.698Z";
+  appendFileSync(path, `${JSON.stringify({ ...JSON.parse(assistant("m2", "Daté")), timestamp: at })}\n`);
+  const { updates } = await tailSession(config, { sessionId: "s", limit: 20 });
+  assert.equal(updates.at(-1)?._meta?.timestamp, at);
+  assert.equal(updates[0]?._meta, undefined);
+});
+
 test("keeps only the last updates within the limit", async () => {
   const { config } = setup();
   assert.deepEqual(texts((await tailSession(config, { sessionId: "s", limit: 1 })).updates), ["agent_message_chunk:Salut"]);

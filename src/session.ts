@@ -1024,8 +1024,12 @@ export async function tailSession(
   const parser = driver.createParser();
   const updates: SessionUpdate[] = [];
   for (const record of driver.replayOrder(records)) {
+    const timestamp = (record as { timestamp?: unknown } | null)?.timestamp;
+    const meta = typeof timestamp === "string" && !Number.isNaN(Date.parse(timestamp)) ? { _meta: { timestamp } } : {};
     for (const event of parser.parse(record, { replay: true })) {
-      if (event.type === "update" && TAIL_UPDATES.has(event.update.sessionUpdate)) updates.push(event.update);
+      if (event.type === "update" && TAIL_UPDATES.has(event.update.sessionUpdate)) {
+        updates.push({ ...event.update, ...meta } as SessionUpdate);
+      }
     }
   }
   return {
