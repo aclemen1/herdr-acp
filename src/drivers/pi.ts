@@ -109,6 +109,10 @@ export class PiDriver implements Driver {
     return match ? match[1]! : null;
   }
 
+  async launchedByHerdrAcp(argvs: string[][]): Promise<boolean> {
+    return (await hasGlobalExtension()) || argvs.some((argv) => argv.includes(extensionPath()));
+  }
+
   async launchArgs(input: LaunchInput): Promise<string[]> {
     const args = input.forkFrom ? ["--fork", input.forkFrom, "--session-id", input.sessionId] : ["--session-id", input.sessionId];
     if (!(await hasGlobalExtension())) args.push("--extension", extensionPath());

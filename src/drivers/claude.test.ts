@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ClaudeTranscriptParser, encodeProjectDir, mergeSettings, toClaudeMcpConfig } from "./claude.ts";
+import { ClaudeDriver, ClaudeTranscriptParser, encodeProjectDir, mergeSettings, toClaudeMcpConfig } from "./claude.ts";
+
+test("recognizes a Claude launched with herdr-acp's settings", async () => {
+  const driver = new ClaudeDriver();
+  const input = { sessionId: "s1", stateDir: "/state" };
+  assert.ok(await driver.launchedByHerdrAcp([["caffeinate"], ["claude", "--resume", "s1", "--settings", "/state/s1.settings.json"]], input));
+  assert.ok(!(await driver.launchedByHerdrAcp([["claude", "--resume", "s1"]], input)));
+});
 
 const assistant = (id: string, content: unknown[], stop = "tool_use") => ({
   type: "assistant",

@@ -20,7 +20,7 @@ import type {
 import { CLIENT_METHODS, RequestError } from "@agentclientprotocol/sdk";
 import { selectValues } from "./config-options.ts";
 import { elicitationContent } from "./elicitation.ts";
-import type { Driver, HookHost, SessionSettings, StatusReport, TokenUsage, TranscriptParser } from "./drivers/types.ts";
+import type { Driver, HookHost, LaunchInput, SessionSettings, StatusReport, TokenUsage, TranscriptParser } from "./drivers/types.ts";
 import { type AgentInfo, type Herdr, HerdrError } from "./herdr.ts";
 import { envFilePath, hookCommand, HookServer, renderEnvFile, socketPath, statusLineCommand } from "./hook-bridge.ts";
 import { JsonlTail } from "./jsonl-tail.ts";
@@ -285,11 +285,23 @@ export class Session implements HookHost {
     );
     await session.listenHooks();
     if (owned && params.tabLabel) await config.herdr.renameTab(pane.tab_id, params.tabLabel);
-    if (running) {
+    if (running && (await session.launchedByHerdrAcp())) {
       if ((await session.writeEnvFile()) && config.driver.envAcknowledged) await session.waitForEnv();
+      await session.declareResumeCommand();
       return session;
     }
     await session.writeEnvFile();
+    if (running) {
+      process.stderr.write(`herdr-acp: ${config.driver.title} in herdr pane ${pane.pane_id} runs without herdr-acp's settings; relaunching it\n`);
+      try {
+        await session.restartWith({});
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
+      await session.waitForStatus();
+      return session;
+    }
     try {
       await session.start({ resume: await config.driver.transcriptExists(params.sessionId), trusted: true });
     } catch (error) {
@@ -719,9 +731,8 @@ export class Session implements HookHost {
     );
   }
 
-  private async start(opts: { resume: boolean; trusted: boolean; mode?: string; forkFrom?: string }): Promise<void> {
-    const { herdr, driver } = this.config;
-    const args = await driver.launchArgs({
+  private launchInput(opts: { resume: boolean; trusted: boolean; mode?: string; forkFrom?: string }): LaunchInput {
+    return {
       sessionId: this.sessionId,
       resume: opts.resume,
       cwd: this.cwd,
@@ -736,7 +747,29 @@ export class Session implements HookHost {
       ...(opts.mode ? { mode: opts.mode } : {}),
       ...(opts.forkFrom ? { forkFrom: opts.forkFrom } : {}),
       ...this.overrides,
-    });
+    };
+  }
+
+  // Without it, a herdr server restart resumes the agent without herdr-acp's settings, hooks and MCP servers.
+  private async declareResumeCommand(mode?: string): Promise<void> {
+    const { herdr, driver } = this.config;
+    try {
+      const args = await driver.launchArgs(this.launchInput({ resume: true, trusted: true, mode: mode ?? this.settings.mode }));
+      await herdr.reportResumeCommand({ paneId: this.paneId, agent: driver.kind, sessionId: this.sessionId, argv: [driver.kind, ...args] });
+    } catch (error) {
+      process.stderr.write(`herdr-acp: could not declare the resume command of session ${this.sessionId}: ${String(error)}\n`);
+    }
+  }
+
+  private async launchedByHerdrAcp(): Promise<boolean> {
+    const argvs = await this.config.herdr.foregroundArgv(this.paneId).catch(() => null);
+    if (!argvs) return true;
+    return this.config.driver.launchedByHerdrAcp(argvs, { sessionId: this.sessionId, stateDir: this.config.stateDir });
+  }
+
+  private async start(opts: { resume: boolean; trusted: boolean; mode?: string; forkFrom?: string }): Promise<void> {
+    const { herdr, driver } = this.config;
+    const args = await driver.launchArgs(this.launchInput(opts));
     const deadline = Date.now() + this.config.startTimeoutMs;
     let name = `acp-${this.sessionId.slice(0, 8).toLowerCase()}`;
     for (;;) {
@@ -750,6 +783,7 @@ export class Session implements HookHost {
         });
         this.paneId = agent.pane_id;
         await this.recordPane();
+        await this.declareResumeCommand(opts.mode);
         return;
       } catch (error) {
         if (!(error instanceof HerdrError) || Date.now() > deadline) throw error;
@@ -767,6 +801,7 @@ export class Session implements HookHost {
     }
     await this.settleStartup(opts.trusted, deadline);
     await this.recordPane();
+    await this.declareResumeCommand(opts.mode);
   }
 
   private async recordPane(): Promise<void> {

@@ -69,13 +69,14 @@ export class Herdr {
     this.serverGraceMs = options.serverGraceMs ?? 3_000;
   }
 
-  async call<T>(args: string[]): Promise<T> {
+  // silent: the command prints nothing on success.
+  async call<T>(args: string[], opts: { silent?: boolean } = {}): Promise<T> {
     try {
-      return await this.callOnce<T>(args);
+      return await this.callOnce<T>(args, opts);
     } catch (error) {
       if (!this.startsServer || !isServerNotRunning(error)) throw error;
       await (this.serverStart ??= this.startServer().finally(() => (this.serverStart = null)));
-      return this.callOnce<T>(args);
+      return this.callOnce<T>(args, opts);
     }
   }
 
@@ -105,8 +106,9 @@ export class Herdr {
     }
   }
 
-  private async callOnce<T>(args: string[]): Promise<T> {
+  private async callOnce<T>(args: string[], opts: { silent?: boolean } = {}): Promise<T> {
     const { stdout, stderr, code } = await run(this.bin, [...this.globalArgs, ...args]);
+    if (opts.silent && code === 0 && !stdout.trim()) return undefined as T;
     const envelope = parseEnvelope<T>(code === 0 ? stdout : stderr || stdout);
     if (envelope?.error) throw new HerdrError(envelope.error.code, envelope.error.message);
     if (code !== 0 || !envelope || envelope.result === undefined) {
@@ -177,6 +179,20 @@ export class Herdr {
         "--timeout", String(opts.timeoutMs), "--", ...opts.args,
       ])
     ).agent;
+  }
+
+  async reportResumeCommand(opts: { paneId: string; agent: string; sessionId: string; argv: string[] }): Promise<void> {
+    await this.call([
+      "pane", "report-agent-session", opts.paneId, "--source", "herdr-acp", "--agent", opts.agent,
+      "--agent-session-id", opts.sessionId, "--", ...opts.argv,
+    ], { silent: true });
+  }
+
+  async foregroundArgv(paneId: string): Promise<string[][]> {
+    const info = await this.call<{ process_info: { foreground_processes?: { argv?: string[] }[] } }>([
+      "pane", "process-info", "--pane", paneId,
+    ]);
+    return (info.process_info.foreground_processes ?? []).map((process) => process.argv ?? []);
   }
 
   async prompt(target: string, text: string): Promise<void> {

@@ -78,6 +78,11 @@ export class ClaudeDriver implements Driver {
     return records;
   }
 
+  async launchedByHerdrAcp(argvs: string[][], input: { sessionId: string; stateDir: string }): Promise<boolean> {
+    const settingsPath = join(input.stateDir, `${input.sessionId}.settings.json`);
+    return argvs.some((argv) => argv.includes(settingsPath));
+  }
+
   deliverQueued(sessionId: string, text: string): Promise<boolean> {
     return deliverToInbox(sessionId, text);
   }
