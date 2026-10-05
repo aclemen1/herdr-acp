@@ -42,10 +42,10 @@ function initialize(args: string[]): Promise<Record<string, unknown>> {
 test("announces herdr extensions per agent at initialize", async () => {
   const claude = (await initialize([]))._meta as { herdr: { agent: string; extensions: Record<string, number> } };
   assert.equal(claude.herdr.agent, "claude");
-  assert.deepEqual(Object.keys(claude.herdr.extensions).sort(), ["delivery", "interaction", "permissionSuggestions", "rateLimits", "sessionConfig", "sessionOwnership", "sessionPlacement", "tabLabel"]);
+  assert.deepEqual(Object.keys(claude.herdr.extensions).sort(), ["delivery", "interaction", "permissionSuggestions", "rateLimits", "sessionConfig", "sessionOwnership", "sessionPlacement", "sessionTail", "tabLabel"]);
   const pi = (await initialize(["--agent", "pi"]))._meta as { herdr: { agent: string; extensions: Record<string, number> } };
   assert.equal(pi.herdr.agent, "pi");
-  assert.deepEqual(Object.keys(pi.herdr.extensions).sort(), ["interaction", "sessionConfig", "sessionOwnership", "sessionPlacement", "tabLabel"]);
+  assert.deepEqual(Object.keys(pi.herdr.extensions).sort(), ["interaction", "sessionConfig", "sessionOwnership", "sessionPlacement", "sessionTail", "tabLabel"]);
 });
 
 test("rejects an unknown interaction before creating anything", async () => {

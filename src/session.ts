@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type {
@@ -995,6 +995,86 @@ export async function listSessions(config: SessionConfig, cwd?: string | null) {
     });
   }
   return sessions;
+}
+
+export type TailResult = { updates: SessionUpdate[]; cursor: string; reset?: true; status?: AgentInfo["agent_status"] };
+
+const TAIL_UPDATES = new Set([
+  "user_message_chunk",
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+]);
+const TAIL_WINDOW_BYTES = 1024 * 1024;
+
+export async function tailSession(
+  config: SessionConfig,
+  params: { sessionId: string; after?: string; limit: number },
+): Promise<TailResult> {
+  const { driver } = config;
+  const agent = await findTailAgent(config, params.sessionId).catch(() => null);
+  const path = await driver.transcriptPath({ sessionId: params.sessionId, cwd: agent?.cwd ?? "", ref: agent?.agent_session ?? null });
+  const size = await statSize(path);
+  const after = params.after === undefined ? null : Number(params.after);
+  const reset = after !== null && after > size;
+  const start = after !== null && !reset ? after : Math.max(0, size - TAIL_WINDOW_BYTES);
+  const { records, end } = await readCompleteLines(path, start, size);
+  const parser = driver.createParser();
+  const updates: SessionUpdate[] = [];
+  for (const record of driver.replayOrder(records)) {
+    for (const event of parser.parse(record, { replay: true })) {
+      if (event.type === "update" && TAIL_UPDATES.has(event.update.sessionUpdate)) updates.push(event.update);
+    }
+  }
+  return {
+    updates: updates.slice(-params.limit),
+    cursor: String(end),
+    ...(reset ? { reset: true as const } : {}),
+    ...(agent ? { status: agent.agent_status } : {}),
+  };
+}
+
+async function findTailAgent(config: SessionConfig, sessionId: string): Promise<AgentInfo | null> {
+  const agents = await config.herdr.listAgents();
+  const live = agents.find((agent) => liveSessionId(config, agent) === sessionId);
+  if (live) return live;
+  const record = await readPaneRecord(config.stateDir, sessionId);
+  return (record && agents.find((agent) => agent.pane_id === record.paneId && agent.agent === config.driver.kind)) ?? null;
+}
+
+async function statSize(path: string): Promise<number> {
+  try {
+    return (await stat(path)).size;
+  } catch {
+    return 0;
+  }
+}
+
+async function readCompleteLines(path: string, start: number, size: number): Promise<{ records: unknown[]; end: number }> {
+  if (size <= start) return { records: [], end: start };
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(size - start);
+    await handle.read(buffer, 0, buffer.length, start);
+    const last = buffer.lastIndexOf(0x0a);
+    if (last < 0) return { records: [], end: start };
+    const records = buffer
+      .subarray(0, last)
+      .toString("utf8")
+      .split("\n")
+      .flatMap((line) => {
+        try {
+          return line.trim() ? [JSON.parse(line) as unknown] : [];
+        } catch {
+          return [];
+        }
+      });
+    return { records, end: start + last + 1 };
+  } finally {
+    await handle.close();
+  }
 }
 
 async function findLiveAgent(config: SessionConfig, sessionId: string): Promise<AgentInfo | null> {

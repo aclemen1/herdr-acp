@@ -8,6 +8,8 @@ import {
   type RequestContext,
   type SessionConfig,
   type SteerOutcome,
+  tailSession,
+  type TailResult,
 } from "./session.ts";
 import { type Interaction, isInteraction } from "./session-prefs.ts";
 
@@ -18,6 +20,25 @@ type SteerParams = {
 };
 
 const MAX_TAB_LABEL = 200;
+const DEFAULT_TAIL_LIMIT = 20;
+const MAX_TAIL_LIMIT = 200;
+
+type TailParams = { sessionId: string; after?: string; limit?: number };
+
+function parseTailParams(raw: unknown): TailParams {
+  const params = (raw ?? {}) as Partial<Record<keyof TailParams, unknown>>;
+  if (typeof params.sessionId !== "string" || !params.sessionId) {
+    throw RequestError.invalidParams(undefined, "_session/tail requires a non-empty sessionId");
+  }
+  if (params.after !== undefined && (typeof params.after !== "string" || !/^\d+$/.test(params.after))) {
+    throw RequestError.invalidParams({ after: params.after }, "_session/tail after must be a cursor returned by _session/tail");
+  }
+  const limit = params.limit;
+  if (limit !== undefined && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_TAIL_LIMIT)) {
+    throw RequestError.invalidParams({ limit }, `_session/tail limit must be an integer from 1 to ${MAX_TAIL_LIMIT}`);
+  }
+  return params as TailParams;
+}
 
 function parseTabLabel(meta: unknown): string | undefined {
   const raw = (meta as { herdr?: { tabLabel?: unknown } } | null | undefined)?.herdr?.tabLabel;
@@ -149,6 +170,7 @@ export function createAgent(config: SessionConfig, version: string) {
               sessionOwnership: 1,
               interaction: 1,
               tabLabel: 1,
+              sessionTail: 1,
               ...config.driver.extensions,
             },
           },
@@ -213,6 +235,9 @@ export function createAgent(config: SessionConfig, version: string) {
     })
     .onRequest<SteerParams, SteerOutcome>("_session/steering", parseSteerParams, async ({ params }) =>
       getSession(params.sessionId).steer(params.prompt, params._meta?.steering?.idleBehavior),
+    )
+    .onRequest<TailParams, TailResult>("_session/tail", parseTailParams, async ({ params }) =>
+      tailSession(config, { sessionId: params.sessionId, after: params.after, limit: params.limit ?? DEFAULT_TAIL_LIMIT }),
     )
     .onRequest("session/list", async ({ params }) => ({ sessions: await listSessions(config, params.cwd) }))
     .onRequest("session/prompt", async ({ params }) => {
