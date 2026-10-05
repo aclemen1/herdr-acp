@@ -86,6 +86,8 @@ const STATUS_WAIT_MS = 3_000;
 const ENV_WAIT_MS = 3_000;
 const EXIT_WAIT_MS = 5_000;
 const QUEUED_CONFIRM_MS = 5_000;
+// Covers a herdr live handoff, which cuts in-flight CLI calls.
+const HERDR_OUTAGE_MS = 30_000;
 const ALWAYS_HANDLED_HOOKS = new Set(["StatusLine", "SessionStart", "FileChanged", "CwdChanged"]);
 
 let placementQueue: Promise<unknown> = Promise.resolve();
@@ -855,6 +857,7 @@ export class Session implements HookHost {
     let quietSince: number | null = null;
     const startedAt = Date.now();
     const backlog: unknown[] = [];
+    let herdrFailingSince: number | null = null;
 
     if (delivery !== "queue" || !(await this.deliverQueued(text, tail, backlog))) await herdr.prompt(this.paneId, text);
 
@@ -877,7 +880,16 @@ export class Session implements HookHost {
       }
       if ((turnEnded || turn.ended) && !hasQueuedMessages(turn)) return;
 
-      const status = (await herdr.getAgent(this.paneId)).agent_status;
+      let status: AgentInfo["agent_status"];
+      try {
+        status = (await herdr.getAgent(this.paneId)).agent_status;
+        herdrFailingSince = null;
+      } catch (error) {
+        if (!(error instanceof HerdrError)) throw error;
+        herdrFailingSince ??= Date.now();
+        if (Date.now() - herdrFailingSince > HERDR_OUTAGE_MS) throw error;
+        status = "unknown";
+      }
       if (status === "working") {
         sawActivity = true;
         quietSince = null;

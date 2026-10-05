@@ -29,7 +29,7 @@ const calls = (dir: string) => readFileSync(join(dir, "calls"), "utf8").trim().s
 
 test("starts the server of a named session that is not running, then retries", async () => {
   const { bin, dir } = fakeBin();
-  const herdr = new Herdr({ bin, session: "routine" });
+  const herdr = new Herdr({ bin, session: "routine", serverGraceMs: 0 });
   assert.deepEqual(await herdr.listWorkspaces(), []);
   assert.ok(existsSync(join(dir, "up")));
   assert.ok(calls(dir).includes("--session routine server"));
@@ -37,9 +37,16 @@ test("starts the server of a named session that is not running, then retries", a
 
 test("starts the server once for concurrent calls", async () => {
   const { bin, dir } = fakeBin();
-  const herdr = new Herdr({ bin, session: "routine" });
+  const herdr = new Herdr({ bin, session: "routine", serverGraceMs: 0 });
   await Promise.all([herdr.listWorkspaces(), herdr.listWorkspaces()]);
   assert.equal(calls(dir).filter((line) => line.endsWith(" server")).length, 1);
+});
+
+test("does not start a server that comes back during the grace period", async () => {
+  const { bin, dir } = fakeBin();
+  setTimeout(() => writeFileSync(join(dir, "up"), ""), 300);
+  assert.deepEqual(await new Herdr({ bin, session: "routine", serverGraceMs: 2_000 }).listWorkspaces(), []);
+  assert.ok(!calls(dir).some((line) => line.endsWith(" server")));
 });
 
 test("does not start the default server", async () => {

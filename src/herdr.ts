@@ -41,6 +41,7 @@ export type HerdrOptions = {
   session?: string;
   machine?: string;
   serverStartTimeoutMs?: number;
+  serverGraceMs?: number;
 };
 
 const SERVER_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|LANG|LC_\w+)$/;
@@ -53,6 +54,7 @@ export class Herdr {
   readonly target: string;
   private readonly startsServer: boolean;
   private readonly serverStartTimeoutMs: number;
+  private readonly serverGraceMs: number;
   private serverStart: Promise<void> | null = null;
 
   constructor(options: HerdrOptions = {}) {
@@ -64,6 +66,7 @@ export class Herdr {
     ];
     this.startsServer = Boolean(options.session) && !options.machine;
     this.serverStartTimeoutMs = options.serverStartTimeoutMs ?? 10_000;
+    this.serverGraceMs = options.serverGraceMs ?? 3_000;
   }
 
   async call<T>(args: string[]): Promise<T> {
@@ -77,17 +80,26 @@ export class Herdr {
   }
 
   private async startServer(): Promise<void> {
+    // A live handoff briefly reports server_not_running; do not start a second server then.
+    if (await this.waitForServer(this.serverGraceMs)) return;
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => SERVER_ENV.test(key)));
     const child = spawn(this.bin, [...this.globalArgs, "server"], { detached: true, stdio: "ignore", env });
     child.once("error", () => {});
     child.unref();
-    const deadline = Date.now() + this.serverStartTimeoutMs;
+    if (!(await this.waitForServer(this.serverStartTimeoutMs))) {
+      throw new HerdrError("server_not_running", `herdr server of session ${this.target} did not start within ${this.serverStartTimeoutMs} ms`);
+    }
+  }
+
+  private async waitForServer(ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms;
     for (;;) {
       try {
         await this.callOnce(["workspace", "list"]);
-        return;
+        return true;
       } catch (error) {
-        if (!isServerNotRunning(error) || Date.now() > deadline) throw error;
+        if (!isServerNotRunning(error)) throw error;
+        if (Date.now() >= deadline) return false;
         await sleep(200);
       }
     }
