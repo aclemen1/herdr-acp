@@ -3,6 +3,7 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import {
   type Delivery,
   type InitialConfig,
+  type Readiness,
   listSessions,
   Session,
   type RequestContext,
@@ -57,6 +58,15 @@ function parseDelivery(meta: unknown): Delivery {
   if (raw === undefined || raw === null) return "now";
   if (raw !== "now" && raw !== "queue") {
     throw RequestError.invalidParams({ delivery: raw }, `unsupported delivery: ${String(raw)} (supported: now, queue)`);
+  }
+  return raw;
+}
+
+function parseReadiness(meta: unknown): Readiness | undefined {
+  const raw = (meta as { herdr?: { readiness?: unknown } } | null | undefined)?.herdr?.readiness;
+  if (raw === undefined || raw === null) return undefined;
+  if (raw !== "ready" && raw !== "placed") {
+    throw RequestError.invalidParams({ readiness: raw }, `unsupported readiness: ${String(raw)} (supported: ready, placed)`);
   }
   return raw;
 }
@@ -122,6 +132,7 @@ export function createAgent(config: SessionConfig, version: string) {
     const takeover = (params._meta as { herdr?: { takeover?: unknown } } | null | undefined)?.herdr?.takeover === true;
     const interaction = parseInteraction(params._meta);
     const tabLabel = parseTabLabel(params._meta);
+    const readiness = parseReadiness(params._meta);
     const session = await Session.load(
       config,
       {
@@ -130,6 +141,7 @@ export function createAgent(config: SessionConfig, version: string) {
         takeover,
         ...(interaction ? { interaction } : {}),
         ...(tabLabel ? { tabLabel } : {}),
+        ...(readiness ? { readiness } : {}),
       },
       ctx,
     );
@@ -171,6 +183,7 @@ export function createAgent(config: SessionConfig, version: string) {
               interaction: 1,
               tabLabel: 1,
               sessionTail: 1,
+              readiness: 1,
               ...config.driver.extensions,
             },
           },

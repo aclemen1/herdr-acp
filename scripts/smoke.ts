@@ -36,6 +36,7 @@ const { values, positionals } = parseArgs({
     list: { type: "boolean", default: false },
     delivery: { type: "string" },
     "answer-after": { type: "string" },
+    readiness: { type: "string" },
   },
 });
 
@@ -58,6 +59,7 @@ const herdrMeta = (extra: Record<string, unknown> = {}) => {
     ...extra,
     ...(values.interaction ? { interaction: values.interaction } : {}),
     ...(values["tab-label"] ? { tabLabel: values["tab-label"] } : {}),
+    ...(values.readiness ? { readiness: values.readiness } : {}),
   };
   return Object.keys(herdr).length > 0 ? { _meta: { herdr } } : {};
 };

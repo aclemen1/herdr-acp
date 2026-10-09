@@ -66,6 +66,7 @@ export type SteerOutcome = { outcome: "injected" | "startedNewTurn" | "promptReq
 type LaunchChange = { mode?: string; model?: string; effort?: string };
 export type InitialConfig = { mode?: string; model?: string; effort?: string };
 export type Delivery = "now" | "queue";
+export type Readiness = "ready" | "placed";
 
 const INITIAL_CONFIG_KEYS = ["mode", "model", "effort"] as const;
 
@@ -254,7 +255,7 @@ export class Session implements HookHost {
   // Reuses the pane herdr-acp itself launched for this session, found through its own pane record.
   private static async reattach(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction; tabLabel?: string },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction; tabLabel?: string; readiness?: Readiness },
     ctx: RequestContext,
     settings: SessionSettings,
   ): Promise<Session | null> {
@@ -294,22 +295,11 @@ export class Session implements HookHost {
     await session.writeEnvFile();
     if (running) {
       process.stderr.write(`herdr-acp: ${config.driver.title} in herdr pane ${pane.pane_id} runs without herdr-acp's settings; relaunching it\n`);
-      try {
-        await session.restartWith({});
-      } catch (error) {
-        await session.close();
-        throw error;
-      }
-      await session.waitForStatus();
+      await session.launch(() => session.restartWith({}), params.readiness);
       return session;
     }
-    try {
-      await session.start({ resume: await config.driver.transcriptExists(params.sessionId), trusted: true });
-    } catch (error) {
-      await session.close();
-      throw error;
-    }
-    await session.waitForStatus();
+    const resume = await config.driver.transcriptExists(params.sessionId);
+    await session.launch(() => session.start({ resume, trusted: true }), params.readiness);
     return session;
   }
 
@@ -322,6 +312,7 @@ export class Session implements HookHost {
       takeover?: boolean;
       interaction?: Interaction;
       tabLabel?: string;
+      readiness?: Readiness;
     },
     ctx: RequestContext,
   ): Promise<Session | null> {
@@ -342,7 +333,7 @@ export class Session implements HookHost {
 
   private static async attach(
     config: SessionConfig,
-    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction; tabLabel?: string },
+    params: { sessionId: string; cwd: string; mcpServers: McpServer[]; interaction: Interaction; tabLabel?: string; readiness?: Readiness },
     ctx: RequestContext,
   ): Promise<Session | null> {
     const settings = await config.driver.initialSettings(config.extraArgs);
@@ -374,14 +365,26 @@ export class Session implements HookHost {
     });
     await session.listenHooks();
     await session.writeEnvFile();
-    try {
-      await session.start({ resume: true, trusted });
-    } catch (error) {
-      await session.close();
-      throw error;
-    }
-    await session.waitForStatus();
+    await session.launch(() => session.start({ resume: true, trusted }), params.readiness);
     return session;
+  }
+
+  // "placed" answers once the pane exists; the agent keeps starting and the next prompt waits for it.
+  private async launch(run: () => Promise<void>, readiness: Readiness = "ready"): Promise<void> {
+    const started = run().then(() => this.waitForStatus());
+    if (readiness === "ready") {
+      try {
+        await started;
+      } catch (error) {
+        await this.close();
+        throw error;
+      }
+      return;
+    }
+    this.restarting = started;
+    started.catch((error) => {
+      process.stderr.write(`herdr-acp: ${this.config.driver.title} did not finish starting for session ${this.sessionId}: ${String(error)}\n`);
+    });
   }
 
   async announceCommands(): Promise<void> {
@@ -393,11 +396,11 @@ export class Session implements HookHost {
   }
 
   private async readHistory(onUpdate: (update: SessionUpdate) => void | Promise<void>): Promise<void> {
-    const agent = await this.config.herdr.getAgent(this.paneId);
+    const agent = await this.config.herdr.getAgent(this.paneId).catch(() => null);
     const path = await this.config.driver.transcriptPath({
       sessionId: this.sessionId,
       cwd: this.cwd,
-      ref: agent.agent_session ?? null,
+      ref: agent?.agent_session ?? null,
     });
     const parser = this.config.driver.createParser();
     for (const record of this.config.driver.replayOrder(await new JsonlTail(path).readNew())) {
@@ -609,6 +612,7 @@ export class Session implements HookHost {
   }
 
   async close(): Promise<void> {
+    await this.restarting.catch(() => undefined);
     await this.cancel();
     await this.dispose();
     await this.releaseOwnedTab();
