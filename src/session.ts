@@ -120,6 +120,7 @@ export class Session implements HookHost {
   private pendingMode: string | null = null;
   private pendingConfig: { model?: string; effort?: string } = {};
   private restarting: Promise<void> = Promise.resolve();
+  private clientGone = false;
   private promptChain: Promise<unknown> = Promise.resolve();
   private cancelGeneration = 0;
   private readonly mcpServers: McpServer[];
@@ -620,6 +621,9 @@ export class Session implements HookHost {
 
   // Process exit keeps the agent running unless --close-panes-on-exit; a pane started by hand is never closed.
   async shutdown(): Promise<void> {
+    // A "placed" load may still be starting the agent: finish it so the pane record and resume command exist.
+    this.clientGone = true;
+    await this.restarting.catch(() => undefined);
     if (!this.createdTabId || !this.config.closePanesOnExit) return this.dispose();
     await this.close();
   }
@@ -646,6 +650,7 @@ export class Session implements HookHost {
   }
 
   async notify(update: SessionUpdate): Promise<void> {
+    if (this.clientGone) return;
     await this.client.notify(CLIENT_METHODS.session_update, { sessionId: this.sessionId, update });
   }
 
