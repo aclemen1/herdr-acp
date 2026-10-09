@@ -176,3 +176,20 @@ test("reports operations on the TUI message queue", () => {
   assert.deepEqual(op("remove", "more"), [{ type: "queue", change: "dequeue" }]);
   assert.deepEqual(op("popAll", "more"), [{ type: "queue", change: "clear" }]);
 });
+
+test("keeps an MCP server whose env or headers are missing or null", () => {
+  assert.deepEqual(
+    toClaudeMcpConfig([
+      { name: "artefact", command: "artefact", args: ["mcp"], env: null },
+      { name: "bare", command: "bare", args: [] },
+      { type: "http", name: "remote", url: "https://example.test/mcp", headers: null },
+    ] as never),
+    {
+      mcpServers: {
+        artefact: { type: "stdio", command: "artefact", args: ["mcp"], env: {} },
+        bare: { type: "stdio", command: "bare", args: [], env: {} },
+        remote: { type: "http", url: "https://example.test/mcp", headers: {} },
+      },
+    },
+  );
+});

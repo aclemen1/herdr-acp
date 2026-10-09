@@ -244,13 +244,13 @@ export function toClaudeMcpConfig(servers: McpServer[]) {
         type: "stdio",
         command: server.command,
         args: server.args,
-        env: Object.fromEntries(server.env.map((variable) => [variable.name, variable.value])),
+        env: Object.fromEntries((server.env ?? []).map((variable) => [variable.name, variable.value])),
       };
     } else if ("url" in server) {
       mcpServers[server.name] = {
         type: server.type === "sse" ? "sse" : "http",
         url: server.url,
-        headers: Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
+        headers: Object.fromEntries((server.headers ?? []).map((header) => [header.name, header.value])),
       };
     }
   }

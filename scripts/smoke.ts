@@ -35,6 +35,7 @@ const { values, positionals } = parseArgs({
     image: { type: "string" },
     list: { type: "boolean", default: false },
     delivery: { type: "string" },
+    "answer-after": { type: "string" },
   },
 });
 
@@ -66,7 +67,8 @@ const log = (label: string, detail: unknown = "") =>
 
 await acp
   .client({ name: "herdr-acp-smoke" })
-  .onRequest("session/request_permission", ({ params }) => {
+  .onRequest("session/request_permission", async ({ params }) => {
+    if (values["answer-after"]) await new Promise((resolve) => setTimeout(resolve, Number(values["answer-after"])));
     const optionId = values.deny ? "reject" : values.always ? "allow_always" : "allow";
     const always = params.options.find((option) => option.optionId === "allow_always");
     if (always?._meta) log("ALWAYS_META", always._meta);
@@ -76,7 +78,8 @@ await acp
     log("PERMISSION", { title: params.toolCall.title, options: params.options.map((o) => o.name), answer: chosen });
     return { outcome: { outcome: "selected", optionId: chosen } };
   })
-  .onRequest("elicitation/create", ({ params }) => {
+  .onRequest("elicitation/create", async ({ params }) => {
+    if (values["answer-after"]) await new Promise((resolve) => setTimeout(resolve, Number(values["answer-after"])));
     if (!("requestedSchema" in params)) return { action: "decline" };
     const requested = params.requestedSchema as acp.ElicitationSchema;
     const content: Record<string, unknown> = {};

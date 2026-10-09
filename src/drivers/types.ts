@@ -78,7 +78,12 @@ export interface HookHost {
   takePendingMode(): string | null;
   restorePendingMode(modeId: string): void;
   continueWithMode(modeId: string, prompt: string): void;
-  elicit(request: { message: string; schema: ElicitationSchema; toolCallId?: string }): Promise<CreateElicitationResponse | null>;
+  elicit(request: {
+    message: string;
+    schema: ElicitationSchema;
+    toolCallId?: string;
+    summary?: string;
+  }): Promise<CreateElicitationResponse | null>;
   markCancelled(): void;
   envApplied(): void;
 }

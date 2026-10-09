@@ -313,6 +313,7 @@ async function answerQuestions(host: HookHost, toolInput: Record<string, unknown
     message: questions.length === 1 ? "Claude has a question" : `Claude has ${questions.length} questions`,
     schema: questionsSchema(questions),
     ...(toolCallId ? { toolCallId } : {}),
+    ...(questions[0]?.question ? { summary: questions[0].question } : {}),
   });
   if (response) {
     if (response.action === "accept") return allow(answersFromContent(questions, elicitationContent(response)));

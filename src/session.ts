@@ -28,6 +28,7 @@ import { type Interaction, readSessionPrefs, writeSessionPrefs } from "./session
 import { acquireOwnership, checkOwnership, type Owner, releaseOwnership } from "./ownership.ts";
 import { deletePaneRecord, listPaneRecords, readPaneRecord, writePaneRecord } from "./pane-records.ts";
 import { planReattach, releasePane, stopAgent } from "./pane-release.ts";
+import { markPending, type Pending, readPending } from "./pending.ts";
 import { promptToText } from "./prompt.ts";
 
 export type SessionConfig = {
@@ -676,27 +677,44 @@ export class Session implements HookHost {
   }
 
   async requestPermission(toolCall: ToolCallUpdate, options: PermissionOption[]): Promise<string | null> {
-    const response = await this.client.request(CLIENT_METHODS.session_request_permission, {
-      sessionId: this.sessionId,
-      toolCall,
-      options,
+    const clear = await markPending(this.config.stateDir, this.sessionId, {
+      kind: "permission",
+      title: toolCall.title ?? "permission",
     });
-    return response.outcome.outcome === "selected" ? response.outcome.optionId : null;
+    try {
+      const response = await this.client.request(CLIENT_METHODS.session_request_permission, {
+        sessionId: this.sessionId,
+        toolCall,
+        options,
+      });
+      return response.outcome.outcome === "selected" ? response.outcome.optionId : null;
+    } finally {
+      await clear();
+    }
   }
 
   async elicit(request: {
     message: string;
     schema: ElicitationSchema;
     toolCallId?: string;
+    summary?: string;
   }): Promise<CreateElicitationResponse | null> {
     if (!this.config.client.capabilities?.elicitation?.form) return null;
-    return this.client.request(CLIENT_METHODS.elicitation_create, {
-      mode: "form",
-      sessionId: this.sessionId,
-      ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}),
-      message: request.message,
-      requestedSchema: request.schema,
+    const clear = await markPending(this.config.stateDir, this.sessionId, {
+      kind: "question",
+      title: request.summary ?? request.message,
     });
+    try {
+      return await this.client.request(CLIENT_METHODS.elicitation_create, {
+        mode: "form",
+        sessionId: this.sessionId,
+        ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}),
+        message: request.message,
+        requestedSchema: request.schema,
+      });
+    } finally {
+      await clear();
+    }
   }
 
   envApplied(): void {
@@ -1044,7 +1062,13 @@ export async function listSessions(config: SessionConfig, cwd?: string | null) {
   return sessions;
 }
 
-export type TailResult = { updates: SessionUpdate[]; cursor: string; reset?: true; status?: AgentInfo["agent_status"] };
+export type TailResult = {
+  updates: SessionUpdate[];
+  cursor: string;
+  reset?: true;
+  status?: AgentInfo["agent_status"];
+  pending?: Pending;
+};
 
 const TAIL_UPDATES = new Set([
   "user_message_chunk",
@@ -1064,6 +1088,7 @@ export async function tailSession(
   const agent = await findTailAgent(config, params.sessionId).catch(() => null);
   const path = await driver.transcriptPath({ sessionId: params.sessionId, cwd: agent?.cwd ?? "", ref: agent?.agent_session ?? null });
   const size = await statSize(path);
+  const pending = await readPending(config.stateDir, params.sessionId);
   const after = params.after === undefined ? null : Number(params.after);
   const reset = after !== null && after > size;
   const start = after !== null && !reset ? after : Math.max(0, size - TAIL_WINDOW_BYTES);
@@ -1084,6 +1109,7 @@ export async function tailSession(
     cursor: String(end),
     ...(reset ? { reset: true as const } : {}),
     ...(agent ? { status: agent.agent_status } : {}),
+    ...(pending ? { pending } : {}),
   };
 }
 
