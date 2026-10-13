@@ -53,6 +53,19 @@ function parseTabLabel(meta: unknown): string | undefined {
   return raw;
 }
 
+// The herdr workspace, by label, that hosts the session's tab instead of --workspace.
+function parseWorkspace(meta: unknown): string | undefined {
+  const raw = (meta as { herdr?: { workspace?: unknown } } | null | undefined)?.herdr?.workspace;
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string" || !raw.trim() || raw.length > MAX_TAB_LABEL || /[\r\n]/.test(raw)) {
+    throw RequestError.invalidParams(
+      { workspace: raw },
+      `_meta.herdr.workspace must be a non-empty single-line string of at most ${MAX_TAB_LABEL} characters`,
+    );
+  }
+  return raw;
+}
+
 function parseDelivery(meta: unknown): Delivery {
   const raw = (meta as { delivery?: unknown } | null | undefined)?.delivery;
   if (raw === undefined || raw === null) return "now";
@@ -132,6 +145,7 @@ export function createAgent(config: SessionConfig, version: string) {
     const takeover = (params._meta as { herdr?: { takeover?: unknown } } | null | undefined)?.herdr?.takeover === true;
     const interaction = parseInteraction(params._meta);
     const tabLabel = parseTabLabel(params._meta);
+    const workspace = parseWorkspace(params._meta);
     const readiness = parseReadiness(params._meta);
     const session = await Session.load(
       config,
@@ -141,6 +155,7 @@ export function createAgent(config: SessionConfig, version: string) {
         takeover,
         ...(interaction ? { interaction } : {}),
         ...(tabLabel ? { tabLabel } : {}),
+        ...(workspace ? { workspace } : {}),
         ...(readiness ? { readiness } : {}),
       },
       ctx,
@@ -182,6 +197,7 @@ export function createAgent(config: SessionConfig, version: string) {
               sessionOwnership: 1,
               interaction: 1,
               tabLabel: 1,
+              workspace: 1,
               sessionTail: 1,
               readiness: 1,
               ...config.driver.extensions,
@@ -195,6 +211,7 @@ export function createAgent(config: SessionConfig, version: string) {
       const initial = parseInitialConfig(params._meta);
       const interaction = parseInteraction(params._meta);
       const tabLabel = parseTabLabel(params._meta);
+      const workspace = parseWorkspace(params._meta);
       const session = await Session.create(
         config,
         {
@@ -202,6 +219,7 @@ export function createAgent(config: SessionConfig, version: string) {
           ...(initial ? { initial } : {}),
           ...(interaction ? { interaction } : {}),
           ...(tabLabel ? { tabLabel } : {}),
+          ...(workspace ? { workspace } : {}),
         },
         { client, requestId },
       );
@@ -221,6 +239,7 @@ export function createAgent(config: SessionConfig, version: string) {
     .onRequest("session/fork", async ({ params, client, requestId }) => {
       const interaction = parseInteraction(params._meta);
       const tabLabel = parseTabLabel(params._meta);
+      const workspace = parseWorkspace(params._meta);
       const session = await Session.fork(
         config,
         {
@@ -228,6 +247,7 @@ export function createAgent(config: SessionConfig, version: string) {
           mcpServers: params.mcpServers ?? [],
           ...(interaction ? { interaction } : {}),
           ...(tabLabel ? { tabLabel } : {}),
+          ...(workspace ? { workspace } : {}),
         },
         { client, requestId },
       );

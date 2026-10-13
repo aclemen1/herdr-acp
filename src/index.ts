@@ -22,7 +22,8 @@ outside herdr-acp can be driven over ACP too. The hooks do nothing while no herd
 
 Options:
   --agent <kind>          Agent kind: claude or pi (default: claude)
-  --workspace <label>     herdr workspace that hosts session tabs (default: acp)
+  --workspace <label>     herdr workspace that hosts session tabs (default: acp); a session's
+                          _meta.herdr.workspace replaces it
   --herdr-session <name>  Named herdr session (default: the default session)
   --machine <label>       Saved herdr SSH machine
   --forward-env <list>    Variable names forwarded even when protected (e.g. ANTHROPIC_API_KEY)
