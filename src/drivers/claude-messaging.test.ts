@@ -48,6 +48,17 @@ test("recognizes the enqueue record of the delivered prompt", () => {
   assert.ok(!isQueuedPrompt({ type: "queue-operation", operation: "dequeue" }, "hello"));
 });
 
+test("recognizes the user record an idle session makes of the delivered prompt", () => {
+  const framed = (body: string) =>
+    `Another Claude session sent a message:\n${body}\n\nThis came from another Claude session — not typed by your user.`;
+  const text = "[dossier · samedi 24 octobre 2026, 18:00 (+02:00)]\n\nRythme de CABINET : le soir.";
+  assert.ok(isQueuedPrompt({ type: "user", message: { role: "user", content: framed(text) } }, text));
+  assert.ok(!isQueuedPrompt({ type: "user", message: { role: "user", content: framed("other") } }, text));
+  // The same words typed by the user are not the inbox's delivery.
+  assert.ok(!isQueuedPrompt({ type: "user", message: { role: "user", content: text } }, text));
+  assert.ok(!isQueuedPrompt({ type: "user", message: { role: "user", content: [{ type: "text", text }] } }, text));
+});
+
 test("strips Claude's peer frame", () => {
   const framed = "Another Claude session sent a message:\nline 1\nline 2\n\nThis came from another Claude session — not typed by your user.";
   assert.equal(peerMessageBody(framed), "line 1\nline 2");
