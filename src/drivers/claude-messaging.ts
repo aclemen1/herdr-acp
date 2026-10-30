@@ -37,7 +37,9 @@ export async function deliverToInbox(sessionId: string, text: string, dir = clau
 
 // The inbox's message is confirmed by its enqueue record when the session is
 // busy, or by the user record it becomes at once when the session is idle:
-// missing the latter, the prompt was typed a second time.
+// missing the latter, the prompt was typed a second time. An inbox enqueue
+// record may carry no content (a session busy compacting writes none); a
+// prompt typed in the TUI always carries its text.
 export function isQueuedPrompt(record: unknown, text: string): boolean {
   const rec = record as {
     type?: string;
@@ -46,7 +48,8 @@ export function isQueuedPrompt(record: unknown, text: string): boolean {
     message?: { role?: string; content?: unknown };
   } | null;
   if (rec?.type === "queue-operation") {
-    return rec.operation === "enqueue" && typeof rec.content === "string" && rec.content.trim() === text.trim();
+    if (rec.operation !== "enqueue") return false;
+    return rec.content === undefined || (typeof rec.content === "string" && rec.content.trim() === text.trim());
   }
   if (rec?.type === "user" && typeof rec.message?.content === "string") {
     const content = rec.message.content;

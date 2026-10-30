@@ -48,6 +48,10 @@ test("recognizes the enqueue record of the delivered prompt", () => {
   assert.ok(!isQueuedPrompt({ type: "queue-operation", operation: "dequeue" }, "hello"));
 });
 
+test("recognizes the enqueue record without content a compacting session makes of the delivered prompt", () => {
+  assert.ok(isQueuedPrompt({ type: "queue-operation", operation: "enqueue", sessionId: "s" }, "hello"));
+});
+
 test("recognizes the user record an idle session makes of the delivered prompt", () => {
   const framed = (body: string) =>
     `Another Claude session sent a message:\n${body}\n\nThis came from another Claude session — not typed by your user.`;
