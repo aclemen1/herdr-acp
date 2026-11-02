@@ -114,7 +114,7 @@ A session can also be loaded while it is running in a herdr pane you started you
 - **Prompts** are typed into the TUI with `herdr agent prompt`, exactly as you would.
 - **Transcript**: herdr-acp tails the agent's JSONL session file and turns messages, tool calls and results into `session/update` notifications.
 - **Structured callbacks**: Claude Code hooks (`PreToolUse`, `PermissionRequest`, `MessageDisplay`, `UserPromptSubmit`, `SessionStart`, `CwdChanged`, `FileChanged`) and a Pi extension call back into herdr-acp over a per-session unix socket (`~/.local/state/herdr-acp/s/`). This is how permissions, questions, streaming, modes and turn ends are handled without reading the screen.
-- **Claude status line**: a wrapper status line forwards Claude's status JSON (context window, model, effort, plan usage limits) and then runs your own status line command unchanged.
+- **Claude status line**: a wrapper status line forwards Claude's status JSON (context window, model, effort, plan usage limits) and then runs your own status line command unchanged. It also merges the account's `rate_limits` (5-hour and 7-day windows) into `$OFFICE_RATE_LIMITS_FILE`, default `$XDG_STATE_HOME/office/rate-limits.json`, written atomically for office's sober mode: within a window the highest reading wins, a window past its reset is dropped; `OFFICE_RATE_LIMITS_FILE=off` turns it off.
 - **Outside a turn**, the callbacks do nothing: if you type in the pane yourself, the agent behaves as usual.
 
 ## Global hooks

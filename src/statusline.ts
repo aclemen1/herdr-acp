@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { defaultStateDir, socketPath } from "./hook-bridge.ts";
+import { recordRateLimits } from "./rate-limits.ts";
 
 const raw = readFileSync(0, "utf8");
 const original = process.argv[2] ? Buffer.from(process.argv[2], "base64url").toString("utf8") : "";
@@ -14,6 +15,9 @@ function forward(): Promise<void> {
   } catch {
     return Promise.resolve();
   }
+  try {
+    recordRateLimits(input);
+  } catch {}
   const sessionId = typeof input.session_id === "string" ? input.session_id : undefined;
   const path = process.env.HERDR_ACP_SOCKET ?? (sessionId ? socketPath(defaultStateDir(), sessionId) : undefined);
   if (!path || !existsSync(path)) return Promise.resolve();
