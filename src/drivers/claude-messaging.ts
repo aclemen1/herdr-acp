@@ -3,6 +3,8 @@ import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const ENVELOPE = "cross-session-message";
+
 type RegistryEntry = { pid: string; sessionId?: string; messagingSocketPath?: string; peerProtocol?: number; updatedAt?: number };
 
 export function claudeSessionsDir(): string {
@@ -10,7 +12,25 @@ export function claudeSessionsDir(): string {
 }
 
 // Undocumented Claude Code inbox: socket listed in <pid>.json, peerToken in <pid>.<hash>.key.
-export async function deliverToInbox(sessionId: string, text: string, dir = claudeSessionsDir()): Promise<boolean> {
+export type PeerMode = "bypass" | "prompting";
+
+// Claude Code's class: plan counts as bypass when bypass is available.
+export function peerModeOf(mode: string, bypassAvailable: boolean): PeerMode {
+  return mode === "bypassPermissions" || (mode === "plan" && bypassAvailable) ? "bypass" : "prompting";
+}
+
+// The receiving session holds an inbox message whose sender attests no
+// permission class, or another class, when it bypasses prompts.
+export function peerEnvelope(text: string, fromMode?: PeerMode): string {
+  if (!fromMode) return text;
+  return `<${ENVELOPE} from-name="herdr-acp" from-mode="${fromMode}">\n${text}\n</${ENVELOPE}>`;
+}
+
+export function deliverToInbox(sessionId: string, text: string, fromMode?: PeerMode, dir = claudeSessionsDir()): Promise<boolean> {
+  return deliverRaw(sessionId, peerEnvelope(text, fromMode), dir);
+}
+
+async function deliverRaw(sessionId: string, text: string, dir: string): Promise<boolean> {
   let names: string[];
   try {
     names = await readdir(dir);
@@ -49,7 +69,7 @@ export function isQueuedPrompt(record: unknown, text: string): boolean {
   } | null;
   if (rec?.type === "queue-operation") {
     if (rec.operation !== "enqueue") return false;
-    return rec.content === undefined || (typeof rec.content === "string" && rec.content.trim() === text.trim());
+    return rec.content === undefined || (typeof rec.content === "string" && peerMessageBody(rec.content).trim() === text.trim());
   }
   if (rec?.type === "user" && typeof rec.message?.content === "string") {
     const content = rec.message.content;
@@ -59,9 +79,11 @@ export function isQueuedPrompt(record: unknown, text: string): boolean {
 }
 
 const PEER_FRAME = /^Another Claude session sent a message:\n([\s\S]*?)\n\nThis came from another Claude session\b/;
+const PEER_ENVELOPE = new RegExp(`^<${ENVELOPE}(?: [a-z-]+="[^"<>\\n\\r]*")*>\\n([\\s\\S]*)\\n</${ENVELOPE}>$`);
 
 export function peerMessageBody(content: string): string {
-  return PEER_FRAME.exec(content)?.[1] ?? content;
+  const body = PEER_FRAME.exec(content)?.[1] ?? content;
+  return PEER_ENVELOPE.exec(body.trim())?.[1] ?? body;
 }
 
 async function peerToken(dir: string, names: string[], pid: string): Promise<string | null> {

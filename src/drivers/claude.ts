@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { McpServer, PlanEntry, SessionMode, SessionUpdate } from "@agentclientprotocol/sdk";
 import { argValue, claudeConfigOptions, claudeInitialModel, readUserSettings, withoutArg } from "./claude-config.ts";
 import { claudeHookSettings, createClaudeHookHandler } from "./claude-hooks.ts";
-import { deliverToInbox, isQueuedPrompt, peerMessageBody } from "./claude-messaging.ts";
+import { deliverToInbox, isQueuedPrompt, peerMessageBody, peerModeOf } from "./claude-messaging.ts";
 import { claudeInitialMode, claudeModes } from "./claude-modes.ts";
 import { claudeUserSettingsPath, hasGlobalHerdrAcpHooks, installGlobalHooks, uninstallGlobalHooks } from "./claude-settings.ts";
 import { toolContent, toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
@@ -83,8 +83,10 @@ export class ClaudeDriver implements Driver {
     return argvs.some((argv) => argv.includes(settingsPath));
   }
 
-  deliverQueued(sessionId: string, text: string): Promise<boolean> {
-    return deliverToInbox(sessionId, text);
+  // herdr-acp launched the session in this mode: it attests that class, as
+  // Claude Code lets the host that injects a message declare it.
+  deliverQueued(sessionId: string, text: string, mode: { id: string; bypassAvailable: boolean }): Promise<boolean> {
+    return deliverToInbox(sessionId, text, peerModeOf(mode.id, mode.bypassAvailable));
   }
 
   confirmsQueued(record: unknown, text: string): boolean {

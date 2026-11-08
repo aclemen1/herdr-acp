@@ -892,7 +892,8 @@ export class Session implements HookHost {
   private async deliverQueued(text: string, tail: JsonlTail, backlog: unknown[]): Promise<boolean> {
     const { driver, pollMs } = this.config;
     if (!driver.deliverQueued || !driver.confirmsQueued) return false;
-    if (!(await driver.deliverQueued(this.sessionId, text))) return false;
+    const mode = { id: this.settings.mode, bypassAvailable: this.modes.some((m) => m.id === "bypassPermissions") };
+    if (!(await driver.deliverQueued(this.sessionId, text, mode))) return false;
     const deadline = Date.now() + QUEUED_CONFIRM_MS;
     while (Date.now() < deadline) {
       const records = await tail.readNew();

@@ -115,6 +115,6 @@ export interface Driver {
   readonly envAcknowledged: boolean;
   replayOrder(records: unknown[]): unknown[];
   launchedByHerdrAcp(argvs: string[][], input: { sessionId: string; stateDir: string }): Promise<boolean>;
-  deliverQueued?(sessionId: string, text: string): Promise<boolean>;
+  deliverQueued?(sessionId: string, text: string, mode: { id: string; bypassAvailable: boolean }): Promise<boolean>;
   confirmsQueued?(record: unknown, text: string): boolean;
 }

@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deliverToInbox, isQueuedPrompt, peerMessageBody } from "./claude-messaging.ts";
+import { deliverToInbox, isQueuedPrompt, peerEnvelope, peerMessageBody, peerModeOf } from "./claude-messaging.ts";
 
 function registry(sessionId: string, socketPath: string): string {
   const dir = mkdtempSync(join(tmpdir(), "cc-reg-"));
@@ -28,18 +28,21 @@ test("sends the auth line then the user message to the session's inbox", async (
     server.listen(socketPath);
   });
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(await deliverToInbox("sid-1", "hello", registry("sid-1", socketPath)), true);
+  assert.equal(await deliverToInbox("sid-1", "hello", "bypass", registry("sid-1", socketPath)), true);
   assert.deepEqual((await received).map((line) => JSON.parse(line)), [
     { type: "auth", token: "secret" },
-    { type: "user", message: { role: "user", content: "hello" } },
+    {
+      type: "user",
+      message: { role: "user", content: '<cross-session-message from-name="herdr-acp" from-mode="bypass">\nhello\n</cross-session-message>' },
+    },
   ]);
 });
 
 test("fails without a registry entry or a listening socket", async () => {
   const dir = registry("sid-1", join(tmpdir(), "missing-herdr-acp.sock"));
-  assert.equal(await deliverToInbox("other", "hello", dir), false);
-  assert.equal(await deliverToInbox("sid-1", "hello", dir), false);
-  assert.equal(await deliverToInbox("sid-1", "hello", join(tmpdir(), "no-such-dir-herdr-acp")), false);
+  assert.equal(await deliverToInbox("other", "hello", "bypass", dir), false);
+  assert.equal(await deliverToInbox("sid-1", "hello", "bypass", dir), false);
+  assert.equal(await deliverToInbox("sid-1", "hello", "bypass", join(tmpdir(), "no-such-dir-herdr-acp")), false);
 });
 
 test("recognizes the enqueue record of the delivered prompt", () => {
@@ -67,4 +70,23 @@ test("strips Claude's peer frame", () => {
   const framed = "Another Claude session sent a message:\nline 1\nline 2\n\nThis came from another Claude session — not typed by your user.";
   assert.equal(peerMessageBody(framed), "line 1\nline 2");
   assert.equal(peerMessageBody("plain"), "plain");
+});
+
+test("attests the class Claude Code gives the session's mode", () => {
+  assert.equal(peerModeOf("bypassPermissions", false), "bypass");
+  assert.equal(peerModeOf("plan", true), "bypass");
+  assert.equal(peerModeOf("plan", false), "prompting");
+  assert.equal(peerModeOf("auto", true), "prompting");
+  assert.equal(peerModeOf("default", false), "prompting");
+});
+
+test("recognizes the records of an attested delivery", () => {
+  const text = "line 1\nline 2";
+  const sent = peerEnvelope(text, "prompting");
+  assert.equal(peerMessageBody(sent), text);
+  assert.ok(isQueuedPrompt({ type: "queue-operation", operation: "enqueue", content: sent }, text));
+  const framed = `Another Claude session sent a message:\n${sent}\n\nThis came from another Claude session — not typed by your user.`;
+  assert.ok(isQueuedPrompt({ type: "user", message: { role: "user", content: framed } }, text));
+  assert.ok(isQueuedPrompt({ type: "user", message: { role: "user", content: sent } }, text));
+  assert.ok(!isQueuedPrompt({ type: "user", message: { role: "user", content: peerEnvelope("other", "bypass") } }, text));
 });
