@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { McpServer, PlanEntry, SessionMode, SessionUpdate } from "@agentclientprotocol/sdk";
 import { argValue, claudeConfigOptions, claudeInitialModel, readUserSettings, withoutArg } from "./claude-config.ts";
 import { claudeHookSettings, createClaudeHookHandler } from "./claude-hooks.ts";
-import { deliverToInbox, isQueuedPrompt, peerMessageBody, peerModeOf } from "./claude-messaging.ts";
+import { deliverToInbox, isHeldPrompt, isQueuedPrompt, peerMessageBody, peerModeOf } from "./claude-messaging.ts";
 import { claudeInitialMode, claudeModes } from "./claude-modes.ts";
 import { claudeUserSettingsPath, hasGlobalHerdrAcpHooks, installGlobalHooks, uninstallGlobalHooks } from "./claude-settings.ts";
 import { toolContent, toolKind, toolLocations, toolTitle } from "./claude-tools.ts";
@@ -91,6 +91,10 @@ export class ClaudeDriver implements Driver {
 
   confirmsQueued(record: unknown, text: string): boolean {
     return isQueuedPrompt(record, text);
+  }
+
+  heldQueued(record: unknown, text: string): boolean {
+    return isHeldPrompt(record, text);
   }
   readonly protectedEnv = /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDECODE|CLAUDE_CODE_\w*|CLAUDE_PID|CLAUDE_EFFORT)$/;
 

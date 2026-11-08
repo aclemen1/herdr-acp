@@ -899,6 +899,10 @@ export class Session implements HookHost {
       const records = await tail.readNew();
       backlog.push(...records);
       if (records.some((record) => driver.confirmsQueued!(record, text))) return true;
+      // Typing a held message would deliver it as the user's own input.
+      if (records.some((record) => driver.heldQueued?.(record, text))) {
+        throw new Error(`${driver.title} held the queued prompt (crossSessionInbound); it was not typed`);
+      }
       await sleep(pollMs);
     }
     process.stderr.write(`herdr-acp: ${driver.title} did not confirm the queued prompt; typing it instead\n`);

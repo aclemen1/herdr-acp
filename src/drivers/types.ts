@@ -117,4 +117,5 @@ export interface Driver {
   launchedByHerdrAcp(argvs: string[][], input: { sessionId: string; stateDir: string }): Promise<boolean>;
   deliverQueued?(sessionId: string, text: string, mode: { id: string; bypassAvailable: boolean }): Promise<boolean>;
   confirmsQueued?(record: unknown, text: string): boolean;
+  heldQueued?(record: unknown, text: string): boolean;
 }

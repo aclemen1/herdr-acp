@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deliverToInbox, isQueuedPrompt, peerEnvelope, peerMessageBody, peerModeOf } from "./claude-messaging.ts";
+import { deliverToInbox, isHeldPrompt, isQueuedPrompt, peerEnvelope, peerMessageBody, peerModeOf } from "./claude-messaging.ts";
 
 function registry(sessionId: string, socketPath: string): string {
   const dir = mkdtempSync(join(tmpdir(), "cc-reg-"));
@@ -89,4 +89,14 @@ test("recognizes the records of an attested delivery", () => {
   assert.ok(isQueuedPrompt({ type: "user", message: { role: "user", content: framed } }, text));
   assert.ok(isQueuedPrompt({ type: "user", message: { role: "user", content: sent } }, text));
   assert.ok(!isQueuedPrompt({ type: "user", message: { role: "user", content: peerEnvelope("other", "bypass") } }, text));
+});
+
+test("recognizes the record of a held delivery", () => {
+  const text = "[dossier · dimanche 8 novembre 2026, 13:45 (+01:00)]\n\nDu dossier CABINET : essai.";
+  const held = (preview: string, name = "herdr-acp") =>
+    `Held peer message — from an unidentified session [verified pid 478203] (peer claims name: ${name}); preview: «${preview}» …[6 lines, 711 chars total — expand to review before approving] — not delivered to Claude (1 held). Your "crossSessionInbound" setting is "hold"; set it to "accept" to deliver held messages.`;
+  assert.ok(isHeldPrompt({ type: "system", subtype: "informational", content: held("dossier · dimanche 8 novembre 2026, 13:45 +01:00") }, text));
+  assert.ok(!isHeldPrompt({ type: "system", content: held("dossier · lundi 9 novembre 2026, 08:00 +01:00") }, text));
+  assert.ok(!isHeldPrompt({ type: "system", content: held("dossier · dimanche 8 novembre 2026, 13:45 +01:00", "CABINET") }, text));
+  assert.ok(!isHeldPrompt({ type: "user", message: { role: "user", content: text } }, text));
 });

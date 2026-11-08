@@ -78,6 +78,19 @@ export function isQueuedPrompt(record: unknown, text: string): boolean {
   return false;
 }
 
+// A held inbox message leaves a system record with the sender's claimed name
+// and a preview of the body's first line, scrubbed of brackets and quotes.
+export function isHeldPrompt(record: unknown, text: string): boolean {
+  const rec = record as { type?: string; content?: unknown } | null;
+  if (rec?.type !== "system" || typeof rec.content !== "string") return false;
+  if (!rec.content.startsWith("Held peer message") || !rec.content.includes("(peer claims name: herdr-acp)")) return false;
+  const preview = /preview: \u00ab([^\u00bb]*)\u00bb/.exec(rec.content)?.[1];
+  if (preview === undefined) return true;
+  const firstLine = text.split("\n").find((line) => line.trim() !== "") ?? "";
+  const letters = (s: string) => s.replace(/[^\p{L}\p{N}]+/gu, "");
+  return letters(firstLine).startsWith(letters(preview));
+}
+
 const PEER_FRAME = /^Another Claude session sent a message:\n([\s\S]*?)\n\nThis came from another Claude session\b/;
 const PEER_ENVELOPE = new RegExp(`^<${ENVELOPE}(?: [a-z-]+="[^"<>\\n\\r]*")*>\\n([\\s\\S]*)\\n</${ENVELOPE}>$`);
 
