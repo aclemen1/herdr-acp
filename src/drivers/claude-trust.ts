@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -17,8 +17,16 @@ export async function isClaudeFolderTrusted(cwd: string, configPath = claudeGlob
   for (const start of starts) {
     for (let dir = start; ; dir = dirname(dir)) {
       if (projects[dir]?.hasTrustDialogAccepted || projects[dir.normalize("NFC")]?.hasTrustDialogAccepted) return true;
-      if (dirname(dir) === dir) break;
+      // Claude Code does not inherit trust from above the root of a git repository.
+      if (dirname(dir) === dir || (await exists(join(dir, ".git")))) break;
     }
   }
   return false;
+}
+
+async function exists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
 }
